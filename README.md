@@ -13,6 +13,10 @@ for our changes, validation status, and maintenance practices, and the
 [Combined editor guide](docs/combined-editor-view.md) for the mixed editor view.
 The project badges, community links, and official downloads below refer to upstream Mudlet.
 
+**Development of this fork is assisted by OpenAI Codex**, including implementation,
+tests, and documentation. Samuel George directs the work and manually tests builds.
+See [AI-assisted development](FORK.md#ai-assisted-development) for scope and attribution.
+
 <p align="center">
   <a href="https://discord.gg/kuYvMQ9">
     <img src="https://discordapp.com/api/guilds/283581582550237184/embed.png?style=shield">

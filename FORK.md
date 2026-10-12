@@ -9,11 +9,29 @@ Upstream's credits and project documentation remain in [README.md](README.md).
 Its badges and download links describe upstream, not a validation or release of
 this fork's additions.
 
+## AI-assisted development
+
+Development of this fork involves **OpenAI Codex**. Codex has contributed to the
+Combined editor's design discussions, implementation, automated regression tests,
+code review, and documentation. Codex has generated and revised code and prose
+as part of this work.
+
+Samuel George directs the feature decisions, tests the application interactively,
+and is responsible for accepting and publishing changes. The
+[validation record](#validation-record) distinguishes automated checks from
+manual testing and records the areas that still need validation.
+
+AI-assisted commits include an `Assisted-by: Codex:MODEL_VERSION` trailer naming
+the model used, alongside the human submitter's authorized `Signed-off-by` trailer
+under the repository's [contribution guidance](docs/CONTRIBUTING.md).
+This disclosure describes this fork's contributions; upstream code retains its
+existing attribution and notices.
+
 ## Unreleased changes
 
-Development branch: `codex/combined-editor-view`, based on upstream commit
-`290022ed`. These notes describe the feature in this checkout; a local development
-build does not establish that the branch has been published on GitHub.
+Development branch: [codex/combined-editor-view](https://github.com/sgeorge-robert/Mudlet/tree/codex/combined-editor-view),
+based on upstream commit `290022ed`. The feature's source, tests, and documentation
+are published together on this branch.
 
 - Add the Combined editor view, with same-name folders consolidated for display
   while the original objects, parents, and execution order stay in their units.

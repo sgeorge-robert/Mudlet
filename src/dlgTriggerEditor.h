@@ -82,6 +82,7 @@
 #include "edbee/views/texttheme.h"
 #include "edbee/views/textrenderer.h"
 
+class CombinedEditorView;
 class dlgTimersMainArea;
 class dlgSystemMessageArea;
 class dlgSourceEditorArea;
@@ -112,6 +113,8 @@ class dlgTriggerEditor : public QMainWindow, private Ui::trigger_editor
     friend class AddonControlsTest;
     friend class dlgTriggerEditorUndoRedoTest;
     friend class EditorAddItemTest;
+    friend class CombinedEditorView;
+    friend class CombinedEditorViewTest;
     friend class EditorBannerViewSwitchTest;
     friend class EditorClipboardXmlTest;
     friend class EditorSearchTest;
@@ -656,6 +659,7 @@ private:
     QTreeWidgetItem* mpCurrentTriggerItem = nullptr;
     QTreeWidgetItem* mpCurrentVarItem = nullptr;
 
+    CombinedEditorView* mpCombinedView = nullptr;
     EditorViewType mCurrentView = EditorViewType::cmUnknownView;
 
     QScrollArea* mpScrollArea = nullptr;

@@ -201,6 +201,7 @@ set(mudlet_app_SRCS
     dlgSourceEditorFindArea.cpp
     dlgSystemMessageArea.cpp
     dlgTimersMainArea.cpp
+    CombinedEditorView.cpp
     dlgTriggerEditor.cpp
     dlgTriggerPatternEdit.cpp
     dlgTriggersMainArea.cpp
@@ -505,6 +506,7 @@ set(mudlet_app_HDRS
     dlgSourceEditorFindArea.h
     dlgSystemMessageArea.h
     dlgTimersMainArea.h
+    CombinedEditorView.h
     dlgTriggerEditor.h
     dlgTriggerPatternEdit.h
     dlgTriggersMainArea.h

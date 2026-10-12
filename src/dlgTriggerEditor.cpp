@@ -26,6 +26,7 @@
 
 
 #include "dlgTriggerEditor.h"
+#include "CombinedEditorView.h"
 
 #include "Host.h"
 #include "LuaInterface.h"
@@ -1450,6 +1451,7 @@ dlgTriggerEditor::dlgTriggerEditor(Host* pH)
 
     widget_searchTerm->updateGeometry();
 
+    mpCombinedView = new CombinedEditorView(this);
     showIDLabels(mpHost->showIdsInEditor());
     if (mAutosaveInterval > 0) {
         startTimer(mAutosaveInterval * 1min);
@@ -1458,6 +1460,9 @@ dlgTriggerEditor::dlgTriggerEditor(Host* pH)
 
 dlgTriggerEditor::~dlgTriggerEditor()
 {
+    // Disconnect Combined's model/host callbacks before tearing down their source trees.
+    delete mpCombinedView;
+    mpCombinedView = nullptr;
     // ~QWidget closes the editor once this destructor is done, and whichever
     // of the item fields has the keyboard focus then emits editingFinished()
     // into one of the slot_saveProperty_...() slots when this object is no
@@ -1996,6 +2001,7 @@ void dlgTriggerEditor::writeSettings()
 
 void dlgTriggerEditor::slot_itemSelectedInSearchResults(QTreeWidgetItem* pItem)
 {
+    CombinedEditorView::NavigationGuard navigation(mpCombinedView);
     if (!pItem) {
         return;
     }
@@ -10546,6 +10552,10 @@ void dlgTriggerEditor::rebuildStaleTrees()
 
 void dlgTriggerEditor::enterEvent(TEnterEvent* event)
 {
+    if (mpCombinedView && mpCombinedView->active() && mNeedUpdateData) {
+        mpCombinedView->scheduleRefresh();
+        return;
+    }
     Q_UNUSED(event)
     if (mNeedUpdateData) {
         saveOpenChanges();
@@ -10555,6 +10565,10 @@ void dlgTriggerEditor::enterEvent(TEnterEvent* event)
 
 void dlgTriggerEditor::focusInEvent(QFocusEvent* pE)
 {
+    if (mpCombinedView && mpCombinedView->active() && mNeedUpdateData) {
+        mpCombinedView->scheduleRefresh();
+        return;
+    }
     Q_UNUSED(pE)
     if (mNeedUpdateData) {
         saveOpenChanges();
@@ -10617,6 +10631,8 @@ void dlgTriggerEditor::showEvent(QShowEvent* event)
 
 void dlgTriggerEditor::changeView(EditorViewType view)
 {
+    if (mpCombinedView)
+        mpCombinedView->viewChanging(view);
     saveOpenChanges();
 
     if (mNeedUpdateData) {
@@ -10801,6 +10817,9 @@ void dlgTriggerEditor::changeView(EditorViewType view)
     default:
         qDebug() << "ERROR: dlgTriggerEditor::changeView() undefined view";
     }
+
+    if (mpCombinedView)
+        mpCombinedView->maintainVisibility();
 
     // Update undo/redo button states when changing views
     slot_updateUndoRedoButtonStates();
@@ -11250,6 +11269,8 @@ void dlgTriggerEditor::slot_saveEdits()
 
 void dlgTriggerEditor::slot_addNewItem()
 {
+    if (mpCombinedView && mpCombinedView->addRequested(false))
+        return;
     switch (resolveCurrentView()) {
     case EditorViewType::cmTriggerView:
         addTrigger(false); //add normal trigger
@@ -11293,6 +11314,8 @@ void dlgTriggerEditor::slot_addNewItem()
 
 void dlgTriggerEditor::slot_addNewGroup()
 {
+    if (mpCombinedView && mpCombinedView->addRequested(true))
+        return;
     switch (resolveCurrentView()) {
     case EditorViewType::cmTriggerView:
         addTrigger(true); //add trigger group
@@ -11336,6 +11359,8 @@ void dlgTriggerEditor::slot_addNewGroup()
 
 void dlgTriggerEditor::slot_toggleItemOrGroupActiveFlag()
 {
+    if (mpCombinedView && mpCombinedView->folderActionRequested())
+        return;
     switch (resolveCurrentView()) {
     case EditorViewType::cmTriggerView:
         activeToggle_trigger();
@@ -11454,6 +11479,8 @@ void dlgTriggerEditor::slot_sourceFindTextChanges()
 
 void dlgTriggerEditor::slot_deleteItemOrGroup()
 {
+    if (mpCombinedView && mpCombinedView->folderActionRequested())
+        return;
     switch (resolveCurrentView()) {
     case EditorViewType::cmTriggerView:
         delete_trigger();
@@ -12360,6 +12387,8 @@ void dlgTriggerEditor::exportMultipleKeysToClipboard(const QList<TKey*>& keys)
 
 void dlgTriggerEditor::slot_export()
 {
+    if (mpCombinedView && mpCombinedView->folderActionRequested())
+        return;
     const EditorViewType currentView = resolveCurrentView();
     if (currentView == EditorViewType::cmUnknownView || currentView == EditorViewType::cmVarsView) {
         return;
@@ -12421,6 +12450,8 @@ void dlgTriggerEditor::slot_export()
 
 void dlgTriggerEditor::slot_createModule()
 {
+    if (mpCombinedView && mpCombinedView->folderActionRequested())
+        return;
     const EditorViewType currentView = resolveCurrentView();
     if (currentView == EditorViewType::cmUnknownView || currentView == EditorViewType::cmVarsView) {
         return;
@@ -12472,6 +12503,8 @@ void dlgTriggerEditor::slot_createModule()
 
 void dlgTriggerEditor::slot_copyXml()
 {
+    if (mpCombinedView && mpCombinedView->folderActionRequested())
+        return;
     switch (resolveCurrentView()) {
     case EditorViewType::cmTriggerView:
         exportTriggerToClipboard();
@@ -12608,6 +12641,9 @@ void dlgTriggerEditor::placePastedItems(EditorViewType itemType, const QList<int
 
 void dlgTriggerEditor::slot_pasteXml()
 {
+    if (mpCombinedView && mpCombinedView->folderActionRequested())
+        return;
+    CombinedEditorView::NavigationGuard navigation(mpCombinedView);
     XMLimport reader(mpHost);
 
     switch (resolveCurrentView()) {
@@ -13161,6 +13197,7 @@ void dlgTriggerEditor::slot_pasteXml()
 
 void dlgTriggerEditor::slot_import()
 {
+    CombinedEditorView::NavigationGuard navigation(mpCombinedView);
     switch (mCurrentView) {
     case EditorViewType::cmTriggerView:
         saveTrigger();
@@ -13262,6 +13299,12 @@ void dlgTriggerEditor::runScheduledCleanReset()
         return;
     }
 
+    if (mpCombinedView && mpCombinedView->active()) {
+        // A native tree reset clears the form; refresh the projection to preserve an open draft.
+        mNeedUpdateData = true;
+        mpCombinedView->scheduleRefresh();
+        return;
+    }
     // Clear all current item pointers BEFORE attempting to save or clear tree widgets
     // to prevent heap-use-after-free when the tree widgets are cleared
     mpCurrentTriggerItem = nullptr;
@@ -14739,6 +14782,7 @@ void restoreExpansionState(QTreeWidgetItem* parent, const QSet<int>& expandedIDs
 
 void dlgTriggerEditor::slot_itemsChanged(EditorViewType viewType, QList<int> affectedItemIDs)
 {
+    CombinedEditorView::NavigationGuard navigation(mpCombinedView);
     if (mCurrentView != viewType) {
         switch (viewType) {
         case EditorViewType::cmTriggerView:

@@ -4,6 +4,11 @@ This directory contains documentation files intended for developers and contribu
 
 ## Files and Their Purpose
 
+### Fork Documentation
+
+- [Fork notes](../FORK.md) - Scope, unreleased changes, validation status, and maintenance practices for this fork
+- [Combined editor view](combined-editor-view.md) - Usage, design invariants, implementation map, limitations, and testing instructions
+
 ### Community & Contribution Files
 
 - **`CODE_OF_CONDUCT.md`** - Community standards and behavior expectations

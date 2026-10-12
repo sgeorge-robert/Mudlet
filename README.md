@@ -8,6 +8,11 @@
 
 <h4 align="center">Play immersive, multiplayer, pure-text RPGs on Mudlet.</h4>
 
+This is **sgeorge-robert's development fork** of Mudlet. See the [fork notes](FORK.md)
+for our changes, validation status, and maintenance practices, and the
+[Combined editor guide](docs/combined-editor-view.md) for the mixed editor view.
+The project badges, community links, and official downloads below refer to upstream Mudlet.
+
 <p align="center">
   <a href="https://discord.gg/kuYvMQ9">
     <img src="https://discordapp.com/api/guilds/283581582550237184/embed.png?style=shield">

@@ -13503,8 +13503,18 @@ void dlgTriggerEditor::setShortcuts(QList<QAction*> actionList, const bool activ
 {
     QString buttonLabel;
     for (auto& action : actionList) {
+        const QVariant capturedShortcuts = action->property("keyCaptureShortcuts");
         if (!active) {
-            action->setShortcut(QString());
+            // Labels vary by category and the label map omits Add/Delete; preserve each action's bindings.
+            if (!capturedShortcuts.isValid()) {
+                action->setProperty("keyCaptureShortcuts", QVariant::fromValue(action->shortcuts()));
+            }
+            action->setShortcuts({});
+            continue;
+        }
+        if (capturedShortcuts.isValid()) {
+            action->setShortcuts(capturedShortcuts.value<QList<QKeySequence>>());
+            action->setProperty("keyCaptureShortcuts", QVariant());
             continue;
         }
         buttonLabel = action->text();

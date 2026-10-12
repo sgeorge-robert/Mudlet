@@ -194,6 +194,7 @@ set(EDITOR_GROUP_TEST_SOURCES
     EditorBannerViewSwitchTest.cpp
     EditorItemXMLHelpersTest.cpp
     ColorTriggerDialogTest.cpp
+    EditorKeyCaptureTest.cpp
     EditorReshowTest.cpp
     PackageExporterTest.cpp
     EditorWindowPositionTest.cpp

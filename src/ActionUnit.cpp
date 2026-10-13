@@ -408,6 +408,8 @@ std::pair<bool, QString> ActionUnit::setToolBarActive(const QString& name, const
 
     if (found) {
         updateAllToolbars();
+        // A state-only update must not invalidate native editor trees or save their open drafts.
+        emit mpHost->signal_toolBarStateChanged();
     }
     TAppFrontend::instance()->processEventLoopHack();
     if (found) {

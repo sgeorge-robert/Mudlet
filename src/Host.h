@@ -1256,6 +1256,7 @@ signals:
     void signal_scriptToggled(int id);
     void signal_scriptCodeChanged(int id);
     void signal_itemsChangedByScript();
+    void signal_toolBarStateChanged();
     void signal_keyBoundByScript(int id);
     void signal_errorConsolePrint(const QString& text, const QColor& fgColor, const QColor& bgColor);
     // For the profile's module manager, if it has one: a script installed or

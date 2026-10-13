@@ -1872,6 +1872,8 @@ void dlgTriggerEditor::slot_addPattern()
 
 void dlgTriggerEditor::slot_hideVariable(bool status)
 {
+    if (mpCombinedView && mpCombinedView->active() && !mpCombinedView->variableSaveAllowed())
+        return;
     LuaInterface* lI = mpHost->getLuaInterface();
     VarUnit* vu = lI->getVarUnit();
     TVar* var = treeWidget_variables->variableForRow(vu, mpCurrentVarItem);
@@ -1881,6 +1883,8 @@ void dlgTriggerEditor::slot_hideVariable(bool status)
         } else {
             vu->removeHidden(var);
         }
+        if (mpCombinedView)
+            mpCombinedView->scheduleRefresh();
     }
 }
 
@@ -1997,10 +2001,15 @@ void dlgTriggerEditor::writeSettings()
     settings.setValue("mSearchSplitterState", mSearchSplitterState);
 
     settings.setValue("showAllTriggerControls", mShowAllTriggerControls);
+    if (mpCombinedView) {
+        mpCombinedView->writeSettings();
+    }
 }
 
 void dlgTriggerEditor::slot_itemSelectedInSearchResults(QTreeWidgetItem* pItem)
 {
+    if (mpCombinedView && !mpCombinedView->variableNavigationAllowed())
+        return;
     CombinedEditorView::NavigationGuard navigation(mpCombinedView);
     if (!pItem) {
         return;
@@ -2378,7 +2387,7 @@ void dlgTriggerEditor::slot_itemSelectedInSearchResults(QTreeWidgetItem* pItem)
         while (it.hasNext()) {
             QTreeWidgetItem* treeWidgetItem = it.next();
             TVar* var = treeWidget_variables->variableForRow(vu, treeWidgetItem);
-            if (vu->shortVarName(var) == varShort) {
+            if (var && vu->shortVarName(var) == varShort && (!mpCombinedView || mpCombinedView->variableSearchMatches(pItem, var))) {
                 show_vars();
                 treeWidget_variables->setCurrentItem(treeWidgetItem, 0);
                 treeWidget_variables->scrollToItem(treeWidgetItem);
@@ -2517,6 +2526,8 @@ void dlgTriggerEditor::searchVariables(const QString& text)
                 parent = new QTreeWidgetItem(sl);
                 // We do not (yet) worry about multiple search results in the "name"
                 setAllSearchData(parent, name, vu->shortVarName(varDecendent), SearchResultIsName, startPos);
+                if (mpCombinedView)
+                    mpCombinedView->recordVariableSearchResult(parent, varDecendent);
                 treeWidget_searchResults->addTopLevelItem(parent);
             }
 
@@ -2531,12 +2542,16 @@ void dlgTriggerEditor::searchVariables(const QString& text)
                     parent = new QTreeWidgetItem(sl);
                     // We do not (yet) worry about multiple search results in the "value"
                     setAllSearchData(parent, name, vu->shortVarName(varDecendent), SearchResultIsValue, startPos);
+                    if (mpCombinedView)
+                        mpCombinedView->recordVariableSearchResult(parent, varDecendent);
                     treeWidget_searchResults->addTopLevelItem(parent);
                 } else {
                     sl << QString() << QString() << tr("Value") << value;
                     pItem = new QTreeWidgetItem(sl);
                     // We do not (yet) worry about multiple search results in the "value"
                     setAllSearchData(pItem, name, vu->shortVarName(varDecendent), SearchResultIsValue, startPos);
+                    if (mpCombinedView)
+                        mpCombinedView->recordVariableSearchResult(pItem, varDecendent);
                     parent->addChild(pItem);
                     parent->setExpanded(true);
                 }
@@ -3377,6 +3392,8 @@ void dlgTriggerEditor::delete_action()
 
 void dlgTriggerEditor::delete_variable()
 {
+    if (mpCombinedView && mpCombinedView->active() && !mpCombinedView->variableSaveAllowed())
+        return;
     QList<QTreeWidgetItem*> selectedItems = treeWidget_variables->selectedItems();
     if (selectedItems.isEmpty()) {
         return;
@@ -7191,6 +7208,8 @@ void dlgTriggerEditor::saveVar()
     if (!mpCurrentVarItem) {
         return;
     }
+    if (mpCombinedView && !mpCombinedView->variableSaveAllowed())
+        return;
     QTreeWidgetItem* pItem = mpCurrentVarItem;
     if (!pItem->parent()) {
         return;
@@ -8663,6 +8682,8 @@ void dlgTriggerEditor::slot_variableSelected(QTreeWidgetItem* pItem)
                        "Its value may show up blank for the same reason. A script can still change it.")
                             .arg(var->getName().toHtmlEscaped()));
     }
+    if (mpCombinedView)
+        mpCombinedView->variableSelected();
 }
 
 void dlgTriggerEditor::slot_actionSelected(QTreeWidgetItem* pItem)
@@ -9991,6 +10012,10 @@ void dlgTriggerEditor::paintTriggerItem(QTreeWidgetItem* pItem, TTrigger* pT, bo
 
 void dlgTriggerEditor::repopulateVars()
 {
+    if (mpCombinedView && mpCombinedView->active() && mpCombinedView->includesVariables() && !mpCombinedView->readingVariables()) {
+        mpCombinedView->refreshVariables();
+        return;
+    }
     treeWidget_variables->setUpdatesEnabled(false);
     mpVarBaseItem = new QTreeWidgetItem(QStringList(tr("Variables")));
     mpVarBaseItem->setTextAlignment(0, Qt::AlignLeft | Qt::AlignVCenter);
@@ -10544,7 +10569,9 @@ void dlgTriggerEditor::rebuildStaleTrees()
     treeWidget_scripts->clear();
     treeWidget_actions->clear();
     treeWidget_keys->clear();
-    treeWidget_variables->clear();
+    // Combined refreshes Lua snapshots explicitly; unrelated item changes must not expire its variable rows.
+    if (!mpCombinedView || !mpCombinedView->active() || !mpCombinedView->includesVariables())
+        treeWidget_variables->clear();
     fillout_form();
     mNeedUpdateData = false;
     resolveCurrentView();
@@ -10631,9 +10658,10 @@ void dlgTriggerEditor::showEvent(QShowEvent* event)
 
 void dlgTriggerEditor::changeView(EditorViewType view)
 {
+    // Save while Combined's live-variable conflict guard is still active.
+    saveOpenChanges();
     if (mpCombinedView)
         mpCombinedView->viewChanging(view);
-    saveOpenChanges();
 
     if (mNeedUpdateData) {
         rebuildStaleTrees();
@@ -10838,6 +10866,8 @@ void dlgTriggerEditor::changeView(EditorViewType view)
 
 void dlgTriggerEditor::slot_showTimers()
 {
+    if (mpCombinedView && !mpCombinedView->variableNavigationAllowed())
+        return;
     changeView(EditorViewType::cmTimerView);
     QTreeWidgetItem* pI = treeWidget_timers->topLevelItem(0);
     if (!pI || pI == treeWidget_timers->currentItem() || !pI->childCount()) {
@@ -10880,6 +10910,8 @@ void dlgTriggerEditor::showCurrentTriggerItem()
 
 void dlgTriggerEditor::slot_showTriggers()
 {
+    if (mpCombinedView && !mpCombinedView->variableNavigationAllowed())
+        return;
     changeView(EditorViewType::cmTriggerView);
     QTreeWidgetItem* pI = treeWidget_triggers->topLevelItem(0);
     if (!pI || pI == treeWidget_triggers->currentItem() || !pI->childCount()) {
@@ -10903,6 +10935,8 @@ void dlgTriggerEditor::slot_showTriggers()
 
 void dlgTriggerEditor::slot_showScripts()
 {
+    if (mpCombinedView && !mpCombinedView->variableNavigationAllowed())
+        return;
     changeView(EditorViewType::cmScriptView);
     QTreeWidgetItem* pI = treeWidget_scripts->topLevelItem(0);
     if (!pI || pI == treeWidget_scripts->currentItem() || !pI->childCount()) {
@@ -10926,6 +10960,8 @@ void dlgTriggerEditor::slot_showScripts()
 
 void dlgTriggerEditor::slot_showKeys()
 {
+    if (mpCombinedView && !mpCombinedView->variableNavigationAllowed())
+        return;
     changeView(EditorViewType::cmKeysView);
     QTreeWidgetItem* pI = treeWidget_keys->topLevelItem(0);
     if (!pI || pI == treeWidget_keys->currentItem() || !pI->childCount()) {
@@ -10949,6 +10985,8 @@ void dlgTriggerEditor::slot_showKeys()
 
 void dlgTriggerEditor::slot_showVariables()
 {
+    if (mpCombinedView && !mpCombinedView->variableNavigationAllowed())
+        return;
     changeView(EditorViewType::cmVarsView);
     repopulateVars();
     mpCurrentVarItem = nullptr;
@@ -10976,6 +11014,8 @@ void dlgTriggerEditor::slot_showVariables()
 
 void dlgTriggerEditor::show_vars()
 {
+    if (mpCombinedView && !mpCombinedView->variableNavigationAllowed())
+        return;
     //no repopulation of variables
     changeView(EditorViewType::cmVarsView);
     mpCurrentVarItem = nullptr;
@@ -10997,6 +11037,8 @@ void dlgTriggerEditor::show_vars()
 
 void dlgTriggerEditor::slot_showAliases()
 {
+    if (mpCombinedView && !mpCombinedView->variableNavigationAllowed())
+        return;
     changeView(EditorViewType::cmAliasView);
     QTreeWidgetItem* pI = treeWidget_aliases->topLevelItem(0);
     if (!pI || pI == treeWidget_aliases->currentItem() || !pI->childCount()) {
@@ -11213,6 +11255,8 @@ QString dlgTriggerEditor::profileSettingsPrefix() const
 
 void dlgTriggerEditor::slot_showActions()
 {
+    if (mpCombinedView && !mpCombinedView->variableNavigationAllowed())
+        return;
     changeView(EditorViewType::cmActionView);
     QTreeWidgetItem* pI = treeWidget_actions->topLevelItem(0);
     if (!pI || pI == treeWidget_actions->currentItem() || !pI->childCount()) {
@@ -11636,6 +11680,8 @@ void dlgTriggerEditor::slot_toggleCentralDebugConsole()
 
 void dlgTriggerEditor::slot_nextSection()
 {
+    if (mpCombinedView && mpCombinedView->moveSectionFocus(true))
+        return;
     switch (mCurrentView) {
     case EditorViewType::cmTriggerView:
         if (qsl("edbee::TextEditorComponent").compare(QApplication::focusWidget()->metaObject()->className()) == 0) {
@@ -11766,6 +11812,8 @@ void dlgTriggerEditor::slot_nextSection()
 
 void dlgTriggerEditor::slot_previousSection()
 {
+    if (mpCombinedView && mpCombinedView->moveSectionFocus(false))
+        return;
     switch (mCurrentView) {
     case EditorViewType::cmTriggerView:
         if (QString("edbee::TextEditorComponent").compare(QApplication::focusWidget()->metaObject()->className()) == 0) {

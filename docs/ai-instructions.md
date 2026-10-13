@@ -150,6 +150,7 @@ To demonstrate a bug fix or UI change with a screen recording, follow the before
 ## Build system notes
 
 - **Before running any `cmake`, `ninja` or `make` command, read the `build-mudlet` skill in `.agents/skills/build-mudlet/SKILL.md`.** It carries the per-platform invocation and the parallelism pitfalls; an unbounded build command can saturate the machine's memory.
+- **Local development builds for this fork include MCP support:** configure with `-DUSE_MCPSERVER=ON` unless the user requests otherwise. This is the fork owner's preference as of 12 October 2026. Qt HttpServer and WebSockets are required; the runtime server remains controlled by Mudlet's MCP preferences.
 - **Build system**: CMake (handles platform-specific configurations). See https://wiki.mudlet.org/w/Compiling_Mudlet for instructions.
 - Check code quality with clang-tidy using `.clang-tidy` configuration file
 - Allow up to 10mins for a build - it can take a while

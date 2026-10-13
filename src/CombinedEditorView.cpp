@@ -43,6 +43,7 @@ constexpr int PathRole = Qt::UserRole + 3;
 constexpr int ExpansionPathRole = Qt::UserRole + 4;
 constexpr int VariableIdRole = Qt::UserRole + 201;
 constexpr int VariableSearchPathRole = Qt::UserRole + 202;
+constexpr int VariableWatchEmptyTableSlot = 0;
 char variableWatchKey;
 
 bool tableEmpty(lua_State* state)
@@ -235,6 +236,7 @@ CombinedEditorView::CombinedEditorView(dlgTriggerEditor* editor)
                 QSignalBlocker blocker(mpIncludeVariables);
                 mpIncludeVariables->setChecked(true);
                 mpEditor->saveOpenChanges();
+                // Hiding Variables must retain even an already reported conflict until the user chooses another item.
                 if (mVariableConflict) {
                     return;
                 }
@@ -594,6 +596,13 @@ CombinedEditorView::ItemRef CombinedEditorView::currentEditorItem() const
     return {mpEditor->mCurrentView, tree->currentItem()->data(0, mpEditor->mCurrentView == EditorViewType::cmVarsView ? VariableIdRole : Qt::UserRole).toInt()};
 }
 
+void CombinedEditorView::saveAndClearCurrentItems()
+{
+    // Native saving resolves its destination from the current category and rows; clear them only after it finishes.
+    mpEditor->saveOpenChanges();
+    clearCurrentItems();
+}
+
 void CombinedEditorView::clearCurrentItems()
 {
     mpEditor->mpCurrentTriggerItem = nullptr;
@@ -615,8 +624,7 @@ void CombinedEditorView::show()
         return;
     }
     if (!mActive) {
-        mpEditor->saveOpenChanges();
-        clearCurrentItems();
+        saveAndClearCurrentItems();
         mActive = true;
     }
     mSeparateViewSizes = mpEditor->splitter_main->sizes();
@@ -833,6 +841,8 @@ bool CombinedEditorView::watchVariable(TVar* var)
     if (path.isEmpty() || !lua_checkstack(state, 8))
         return false;
     const int top = lua_gettop(state);
+    // For N path keys, slots 1..N hold containing tables and N+1 the selected value, in a weak-value table.
+    // Slot 0 records emptiness for table values; an explicit length survives holes left by collection.
     lua_newtable(state);
     const int watch = top + 1;
     lua_newtable(state);
@@ -862,7 +872,7 @@ bool CombinedEditorView::watchVariable(TVar* var)
     if (lua_istable(state, -1)) {
         // The native form permits recasting an empty table; stale emptiness must not discard new members.
         lua_pushboolean(state, tableEmpty(state));
-        lua_rawseti(state, watch, 0);
+        lua_rawseti(state, watch, VariableWatchEmptyTableSlot);
     }
     lua_rawseti(state, watch, ++position);
     // Weak values detect collected/replaced tables without keeping game objects alive or trusting reused addresses.
@@ -915,7 +925,7 @@ bool CombinedEditorView::variableMatchesWatch() const
     lua_pop(state, 1);
     if (same && lua_istable(state, -1)) {
         const bool empty = tableEmpty(state);
-        lua_rawgeti(state, watch, 0);
+        lua_rawgeti(state, watch, VariableWatchEmptyTableSlot);
         same = empty == static_cast<bool>(lua_toboolean(state, -1));
     }
     lua_settop(state, top);
@@ -978,6 +988,7 @@ bool CombinedEditorView::variableSaveAllowed()
 
 bool CombinedEditorView::variableNavigationAllowed()
 {
+    // Rejecting a save clears its save target; a later deliberate navigation may leave the retained draft.
     if (!mActive || mpEditor->mCurrentView != EditorViewType::cmVarsView || !mpEditor->mpCurrentVarItem)
         return true;
     return variableSaveAllowed();
@@ -1254,8 +1265,7 @@ void CombinedEditorView::showFolder(QTreeWidgetItem* row, bool saveChanges)
     if (saveChanges) {
         if (!variableNavigationAllowed())
             return;
-        mpEditor->saveOpenChanges();
-        clearCurrentItems();
+        saveAndClearCurrentItems();
     }
     while (auto* item = mpSummaryLayout->takeAt(0)) {
         delete item->widget();
@@ -1320,11 +1330,10 @@ bool CombinedEditorView::editItem(ItemRef ref, bool originalView)
         }
         return true;
     }
-    // Save against the old type/ID before switching forms; rebuilding invalidates native row pointers.
-    mpEditor->saveOpenChanges();
-    clearCurrentItems();
+    saveAndClearCurrentItems();
     if (mpEditor->mNeedUpdateData && ref.type != EditorViewType::cmVarsView)
         mpEditor->rebuildStaleTrees();
+    // A native rebuild may select a default item; discard that save target before resolving the requested original.
     clearCurrentItems();
     auto* source = originalItem(ref);
     if (!source || !data(ref).exists)

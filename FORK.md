@@ -133,6 +133,16 @@ they do not establish Windows access-control coverage. The first build reused
 stale Qt metadata from the MCP-disabled configuration and failed to link.
 Regenerating the core and application automoc files resolved that failure without
 changing MCP source code.
+The controller's save/selection cleanup was checked with the same seven CTest
+cases before and after: Combined, regular key capture, undo/redo, editor reopening,
+item creation, search, and native variable write-back. Both runs reported the same
+208 QTest passes, including setup/cleanup and data rows, with no failures or skips.
+The MCP-enabled `functional_editor_tests` target and main application built
+successfully. The application was relinked after stopping the MCP bridge processes
+that held it open. Refreshing CMake's build metadata updated its version label to
+`5.0.0-dev-734b252b6`; command-line version/help checks passed and exposed the MCP
+bridge option. The cleanup changes only the Combined controller and documentation,
+with no intended behavior change.
 During the earlier Keys/Buttons work, a parallel run hit two fixture connection
 timeouts before test cases ran; both passed when retried alone, and the subsequent
 serial run passed. Documentation/comment review is separate from these tests.

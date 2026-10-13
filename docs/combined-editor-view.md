@@ -321,6 +321,15 @@ row pointers, rebuilds native trees when needed, and selects the exact original.
 Signals are blocked while synchronizing selection, then the corresponding native
 handler is called once. That handler owns the editing form and existing save logic.
 
+The private `saveAndClearCurrentItems()` helper keeps the save-before-clear order
+shared by entering Combined, opening a folder summary, and selecting an original.
+Callers must approve navigation before using it while Combined is active; the
+helper neither checks conflicts itself nor selects or rebuilds a tree. Keep the
+Include Variables toggle's save path separate: it must keep an already reported
+conflict visible, whereas deliberate navigation may leave that retained draft.
+After a native tree rebuild, `editItem()` clears any default selection's save
+target before resolving the requested original again.
+
 `NavigationGuard` distinguishes native operations that temporarily switch a
 category from a user's request to leave Combined. Nested guards defer selection
 synchronization until the outer operation finishes. Do not bypass this routing
@@ -359,6 +368,14 @@ otherwise collectible game tables, or treating a recycled pointer as the same
 table. A VarUnit generation check fences off profile resets before any old TVar
 pointer can be used. The native Variables tree is retained when unrelated editor
 trees are rebuilt. Keep conflict checks on both Save and navigation routes.
+
+Each profile's Lua state holds one watch in the registry under the address of
+`variableWatchKey`. For a path of N keys, slots 1 through N hold the containing
+tables, starting with the globals table; slot N+1 holds the selected value. Slot
+`VariableWatchEmptyTableSlot` (0) records whether a selected table was empty.
+The C++ `mVariableWatchLength` records N+1 explicitly because collection can leave
+holes in the weak-value table. Both watch operations restore the incoming Lua
+stack top; comparison reads the watch without replacing it or writing game data.
 
 Type icons come directly from resources because hidden category trees may be
 stale or unpopulated. Folder-first ordering changes only the display rows. Neither

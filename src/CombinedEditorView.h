@@ -101,6 +101,7 @@ private:
     QTreeWidget* originalTree(EditorViewType) const;
     QTreeWidgetItem* originalItem(ItemRef) const;
     ItemRef currentEditorItem() const;
+    void saveAndClearCurrentItems();
     void clearCurrentItems();
     void appendChildren(QTreeWidgetItem*, const QList<ItemRef>&, const QString&);
     void selectRow(QTreeWidgetItem*);

@@ -8,14 +8,59 @@
 
 <h4 align="center">Play immersive, multiplayer, pure-text RPGs on Mudlet.</h4>
 
-This is **sgeorge-robert's development fork** of Mudlet. See the [fork notes](FORK.md)
-for our changes, validation status, and maintenance practices, and the
-[Combined editor guide](docs/combined-editor-view.md) for the mixed editor view.
-The project badges, community links, and official downloads below refer to upstream Mudlet.
+## Combined editor — development fork
+
+Work with **triggers, aliases, scripts, timers, keys, and buttons in one tree**.
+The Combined view brings related items together while keeping each original
+folder's ownership, settings, and execution behavior intact.
+
+This is [sgeorge-robert's development fork](https://github.com/sgeorge-robert/Mudlet)
+of [Mudlet](https://github.com/Mudlet/Mudlet). The feature is available on
+[`codex/combined-editor-view`](https://github.com/sgeorge-robert/Mudlet/tree/codex/combined-editor-view),
+the fork's default branch. **It is under development; there is no fork release yet.**
 
 **Development of this fork is assisted by OpenAI Codex**, including implementation,
 tests, and documentation. Samuel George directs the work and manually tests builds.
 See [AI-assisted development](FORK.md#ai-assisted-development) for scope and attribution.
+
+[![Combined editor showing all six automation types beside a Lua script](docs/images/combined-editor/overview.jpg)](docs/images/combined-editor/overview.jpg)
+
+*One tree, familiar editors. The offline demo shows folders first, type icons,
+and the difference between an item being disabled and being blocked by its parent.*
+
+- **Browse related automation together.** Matching folder names merge for display,
+  folders come first, and icons identify each item type.
+- **Keep control of the originals.** Open an item's usual editor, or choose the
+  original folder whose code, settings, and actions you want to use.
+- **Include live Lua state when useful.** The optional **Include Variables** setting
+  adds variables and tables; it is off by default and remembered per profile.
+- **Return to a familiar view at any time.** The regular category views remain
+  available from the editor toolbar.
+
+<details>
+  <summary>See how matching folders keep their original settings</summary>
+
+[![Combat folder showing separate choices for two trigger folders and the other original types](docs/images/combined-editor/original-folders.jpg)](docs/images/combined-editor/original-folders.jpg)
+
+Here, seven originals appear as one **Combat** row. Both trigger folders remain
+individually accessible, with their own enabled states. Selecting a choice opens
+that original's settings; right-clicking gives actions for that original.
+
+</details>
+
+These are real captures from a Windows development build using synthetic offline
+data. See the [screenshot notes](docs/images/combined-editor/README.md) for provenance.
+
+Read the [Combined editor guide](docs/combined-editor-view.md) for usage and current
+limits, or the [fork notes](FORK.md) for implementation scope and validation.
+To try it, build this branch using the [build instructions](docs/platform-builds.md),
+open the editor, and select **Combined**. Official upstream downloads do not
+include this fork's additions.
+
+## Upstream Mudlet
+
+The project badges, community links, screenshots, and official downloads below
+refer to upstream Mudlet. Its credits and license remain unchanged.
 
 <p align="center">
   <a href="https://discord.gg/kuYvMQ9">

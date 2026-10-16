@@ -26,8 +26,12 @@
 #include <QPushButton>
 #include <QFontDatabase>
 #include <QFontInfo>
+#include <QLabel>
 #include <QSettings>
+#include <QScopeGuard>
 #include <QSplitter>
+#include <QTabBar>
+#include <QToolBar>
 #include <QTreeWidgetItemIterator>
 #include "CombinedEditorView.h"
 #include "ScriptUnit.h"
@@ -93,6 +97,7 @@ private:
 
     CombinedEditorView* view() const { return mpEditor->mpCombinedView; }
     using Ref = CombinedEditorView::ItemRef;
+    using FolderAction = CombinedEditorView::FolderAction;
 
     TTrigger* trigger(const QString& name, TTrigger* parent = nullptr, bool folder = true)
     {
@@ -142,6 +147,19 @@ private:
         return item;
     }
 
+    TTimer* timer(const QString& name, TTimer* parent = nullptr, bool folder = false)
+    {
+        auto* item = new TTimer(parent, mpHost);
+        item->setName(name);
+        item->setIsFolder(folder);
+        item->setTime(QTime(1, 0));
+        item->setScript(qsl("-- visual indicator fixture"));
+        mpHost->getTimerUnit()->registerTimer(item);
+        item->setIsActive(true);
+        item->stop();
+        return item;
+    }
+
     QTreeWidgetItem* row(Ref ref) const
     {
         for (QTreeWidgetItemIterator it(view()->mpTree); *it; ++it) {
@@ -162,13 +180,79 @@ private:
     {
         auto* item = row(ref);
         QVERIFY(item);
-        view()->mpTree->setCurrentItem(item);
+        view()->mpTree->setCurrentItem(item, 0, QItemSelectionModel::ClearAndSelect);
     }
 
-    QAction* menuAction(QMenu* menu, Ref ref, const QString& operation) const
+    void selectBatch(const QList<Ref>& refs, Ref current)
+    {
+        select(current);
+        view()->mpTree->clearSelection();
+        for (auto ref : refs) {
+            QVERIFY(row(ref));
+            row(ref)->setSelected(true);
+        }
+    }
+
+    QList<Ref> selectedRefs() const
+    {
+        QList<Ref> result;
+        for (auto* item : view()->mpTree->selectedItems())
+            result.append(view()->mMembers.value(item));
+        return result;
+    }
+
+    QAction* treeShortcut(QKeySequence::StandardKey key) const
+    {
+        for (auto* action : view()->mpTree->actions()) {
+            if (action->shortcut() == QKeySequence(key))
+                return action;
+        }
+        return nullptr;
+    }
+
+    Ref automationLeaf(EditorViewType type, const QString& name)
+    {
+        switch (type) {
+        case EditorViewType::cmTriggerView:
+            return {type, trigger(name, nullptr, false)->getID()};
+        case EditorViewType::cmAliasView: {
+            auto* item = new TAlias(name, mpHost);
+            item->setIsFolder(false);
+            item->setRegexCode(qsl("^qaBatchNeverMatches$"));
+            item->setScript({});
+            item->registerAlias();
+            return {type, item->getID()};
+        }
+        case EditorViewType::cmScriptView:
+            return {type, script(name, nullptr, false)->getID()};
+        case EditorViewType::cmTimerView:
+            return {type, timer(name)->getID()};
+        case EditorViewType::cmKeysView:
+            return {type, key(name, nullptr, false)->getID()};
+        case EditorViewType::cmActionView:
+            return {type, button(name, nullptr, false)->getID()};
+        default:
+            return {};
+        }
+    }
+
+    QTabBar* folderTabs() const { return mpEditor->findChild<QTabBar*>(qsl("combinedFolderTabs")); }
+
+    int folderTab(Ref ref) const
+    {
+        if (auto* tabs = folderTabs()) {
+            for (int index = 0; index < tabs->count(); ++index) {
+                if (tabs->tabData(index).toList() == QVariantList{static_cast<int>(ref.type), ref.id})
+                    return index;
+            }
+        }
+        return -1;
+    }
+
+    QAction* menuAction(QMenu* menu, Ref ref, FolderAction operation) const
     {
         for (auto* action : menu->actions()) {
-            if (action->data().toList() == QVariantList{static_cast<int>(ref.type), ref.id, operation})
+            if (action->data().toList() == QVariantList{static_cast<int>(ref.type), ref.id, static_cast<int>(operation)})
                 return action;
             if (action->menu()) {
                 if (auto* found = menuAction(action->menu(), ref, operation))
@@ -306,7 +390,7 @@ private slots:
         auto* tree = mpEditor->findChild<QTreeWidget*>(qsl("treeWidget_combined"));
         QVERIFY(tree);
         QVERIFY(tree->isVisible());
-        QCOMPARE(tree->selectionMode(), QAbstractItemView::SingleSelection);
+        QCOMPARE(tree->selectionMode(), QAbstractItemView::ExtendedSelection);
         QCOMPARE(tree->dragDropMode(), QAbstractItemView::NoDragDrop);
         QVERIFY(triggersBefore == mpHost->getTriggerUnit()->getTriggerRootNodeList());
     }
@@ -414,6 +498,216 @@ private slots:
         view()->refresh();
         for (int i = 0; i < refs.size(); ++i)
             QCOMPARE(row(refs[i])->icon(0).pixmap(24, 24).toImage(), icons[i]);
+
+        const int originalSize = mpEditor->treeWidget_triggers->iconSize().width() / 8;
+        const auto restoreSize = qScopeGuard([originalSize]() {
+            emit mudlet::self() -> signal_setTreeIconSize(originalSize);
+        });
+        const int changedSize = originalSize == 5 ? 4 : 5;
+        emit mudlet::self() -> signal_setTreeIconSize(changedSize);
+        QCOMPARE(mpEditor->treeWidget_triggers->iconSize(), QSize(changedSize * 8, changedSize * 8));
+        QCOMPARE(view()->mpTree->iconSize(), mpEditor->treeWidget_triggers->iconSize());
+        mpEditor->slot_showTriggers();
+        QVERIFY(!view()->active());
+        emit mudlet::self() -> signal_setTreeIconSize(6);
+        showCombined();
+        QCOMPARE(view()->mpTree->iconSize(), QSize(48, 48));
+    }
+
+    void test_subtypeIconsResolveFromObjectsAndReflectNativeStates()
+    {
+        auto* triggerParent = trigger(qsl("qaSubtypeTriggerParent"));
+        auto* filter = trigger(qsl("qaSubtypeFilter"), triggerParent, false);
+        trigger(qsl("qaSubtypeFilterChild"), filter, false);
+        auto* timerParent = timer(qsl("qaSubtypeTimerParent"));
+        auto* offset = timer(qsl("qaSubtypeOffset"), timerParent);
+        const Ref filterRef{EditorViewType::cmTriggerView, filter->getID()};
+        const Ref offsetRef{EditorViewType::cmTimerView, offset->getID()};
+        QVERIFY(filter->isFilterChain());
+        QVERIFY(offset->isOffsetTimer());
+        QVERIFY(!view()->originalItem(filterRef));
+        QVERIFY(!view()->originalItem(offsetRef));
+        showCombined();
+        QVERIFY(row(filterRef) && row(offsetRef));
+        QCOMPARE(row(filterRef)->text(1), qsl("Filter-chain trigger"));
+        QCOMPARE(row(offsetRef)->text(1), qsl("Offset timer"));
+
+        struct StateCase
+        {
+            bool enabled;
+            bool parentEnabled;
+            QString filterIcon;
+            QString offsetIcon;
+            QString state;
+        };
+        const QList<StateCase> cases{{true, true, qsl("filter.png"), qsl("offsettimer-on.png"), qsl("Enabled")},
+                                     {false, true, qsl("filter-locked.png"), qsl("offsettimer-off.png"), qsl("Disabled")},
+                                     {true, false, qsl("filter-grey.png"), qsl("offsettimer-on-grey.png"), qsl("Blocked by parent")},
+                                     {false, false, qsl("filter-grey-locked.png"), qsl("offsettimer-off-grey.png"), qsl("Disabled")}};
+        for (const auto& state : cases) {
+            triggerParent->setIsActive(state.parentEnabled);
+            filter->setIsActive(state.enabled);
+            timerParent->setIsActive(state.parentEnabled);
+            timerParent->stop();
+            offset->setIsActive(state.enabled);
+            offset->stop();
+            QCOMPARE(filter->shouldBeActive(), state.enabled);
+            QCOMPARE(offset->shouldBeActive(), state.enabled);
+            QCOMPARE(filter->ancestorsActive(), state.parentEnabled);
+            QCOMPARE(offset->ancestorsActive(), state.parentEnabled);
+            view()->refresh();
+            QCOMPARE(row(filterRef)->icon(0).pixmap(24, 24).toImage(), QIcon(qsl(":/icons/") + state.filterIcon).pixmap(24, 24).toImage());
+            QCOMPARE(row(offsetRef)->icon(0).pixmap(24, 24).toImage(), QIcon(qsl(":/icons/") + state.offsetIcon).pixmap(24, 24).toImage());
+            QCOMPARE(row(filterRef)->text(2), state.state);
+            QCOMPARE(row(offsetRef)->text(2), state.state);
+        }
+        QVERIFY(!filter->setScript(qsl("function (")));
+        QVERIFY(!offset->setScript(qsl("function (")));
+        view()->refresh();
+        const auto errorIcon = QIcon(qsl(":/icons/tools-report-bug.png")).pixmap(24, 24).toImage();
+        for (auto ref : {filterRef, offsetRef}) {
+            QCOMPARE(row(ref)->text(2), qsl("Error"));
+            QCOMPARE(row(ref)->icon(0).pixmap(24, 24).toImage(), errorIcon);
+        }
+        QCOMPARE(filter->getParent(), triggerParent);
+        QCOMPARE(offset->getParent(), timerParent);
+    }
+
+    void test_subtypeTransitionsRefreshWithoutSavingCurrentDraft()
+    {
+        auto* changingTrigger = trigger(qsl("qaSubtypeChangingTrigger"), nullptr, false);
+        auto* timerFolder = timer(qsl("qaSubtypeTimerFolder"), nullptr, true);
+        auto* regularTimer = timer(qsl("qaSubtypeRegularTimer"));
+        auto* changingTimer = timer(qsl("qaSubtypeChangingTimer"), timerFolder);
+        auto* draftScript = script(qsl("qaSubtypeDraft"), nullptr, false);
+        const Ref triggerRef{EditorViewType::cmTriggerView, changingTrigger->getID()};
+        const Ref timerRef{EditorViewType::cmTimerView, changingTimer->getID()};
+        const Ref draftRef{EditorViewType::cmScriptView, draftScript->getID()};
+        showCombined();
+        select(draftRef);
+        const auto clearDraft = qScopeGuard([this, draftRef]() {
+            if (view()->currentEditorItem() == draftRef)
+                mpEditor->mpSourceEditorEdbeeDocument->setText(QString());
+        });
+        const QString draft = qsl("qaSubtypeDraftExecutions = (qaSubtypeDraftExecutions or 0) + 1\n");
+        mpEditor->mpSourceEditorEdbeeDocument->setText(draft);
+        QVERIFY(!changingTrigger->isFilterChain());
+        QVERIFY(!changingTimer->isOffsetTimer());
+        const auto triggerIcon = row(triggerRef)->icon(0).pixmap(24, 24).toImage();
+        const auto timerIcon = row(timerRef)->icon(0).pixmap(24, 24).toImage();
+        QCOMPARE(triggerIcon, QIcon(qsl(":/icons/tools-wizard.png")).pixmap(24, 24).toImage());
+        QCOMPARE(timerIcon, QIcon(qsl(":/icons/chronometer.png")).pixmap(24, 24).toImage());
+        auto* child = trigger(qsl("qaSubtypeNewChild"), changingTrigger, false);
+        mpHost->getTimerUnit()->reParentTimer(changingTimer->getID(), timerFolder->getID(), regularTimer->getID());
+        changingTimer->stop();
+        QVERIFY(changingTrigger->isFilterChain());
+        QVERIFY(changingTimer->isOffsetTimer());
+        emit mpHost->signal_itemsChangedByScript();
+        QTRY_COMPARE(row(triggerRef)->text(1), qsl("Filter-chain trigger"));
+        QCOMPARE(row(timerRef)->text(1), qsl("Offset timer"));
+        QVERIFY(row(triggerRef)->icon(0).pixmap(24, 24).toImage() != triggerIcon);
+        QVERIFY(row(timerRef)->icon(0).pixmap(24, 24).toImage() != timerIcon);
+        QVERIFY(view()->currentEditorItem() == draftRef);
+        QCOMPARE(mpEditor->mpSourceEditorEdbeeDocument->text(), draft);
+        QVERIFY(draftScript->getScript().isEmpty());
+        QVERIFY(mpHost->getLuaInterpreter()->compileAndExecuteScript(qsl("assert(qaSubtypeDraftExecutions == nil)")));
+
+        delete child;
+        mpHost->getTimerUnit()->reParentTimer(changingTimer->getID(), regularTimer->getID(), timerFolder->getID());
+        changingTimer->stop();
+        QVERIFY(!changingTrigger->isFilterChain());
+        QVERIFY(!changingTimer->isOffsetTimer());
+        emit mpHost->signal_itemsChangedByScript();
+        QTRY_COMPARE(row(triggerRef)->text(1), qsl("Trigger"));
+        QCOMPARE(row(timerRef)->text(1), qsl("Timer"));
+        QCOMPARE(row(triggerRef)->icon(0).pixmap(24, 24).toImage(), triggerIcon);
+        QCOMPARE(row(timerRef)->icon(0).pixmap(24, 24).toImage(), timerIcon);
+        QCOMPARE(changingTimer->getParent(), timerFolder);
+        QVERIFY(view()->currentEditorItem() == draftRef);
+        QCOMPARE(mpEditor->mpSourceEditorEdbeeDocument->text(), draft);
+        QVERIFY(draftScript->getScript().isEmpty());
+        QVERIFY(mpHost->getLuaInterpreter()->compileAndExecuteScript(qsl("assert(qaSubtypeDraftExecutions == nil)")));
+    }
+
+    void test_filterFolderKeepsItsIdentityWhenMerged()
+    {
+        auto* filter = trigger(qsl("qaSubtypeMixedFolder"));
+        filter->setRegexCodeList({qsl("qaSubtypeNeverMatches")}, {REGEX_SUBSTRING});
+        auto* child = trigger(qsl("qaSubtypeNested"), filter, false);
+        const Ref filterRef{EditorViewType::cmTriggerView, filter->getID()};
+        QVERIFY(filter->isFolder() && filter->isFilterChain());
+        showCombined();
+        QCOMPARE(row(filterRef)->text(1), qsl("Filter-chain trigger"));
+        const auto filterIcon = QIcon(qsl(":/icons/filter.png")).pixmap(24, 24).toImage();
+        QCOMPARE(row(filterRef)->icon(0).pixmap(24, 24).toImage(), filterIcon);
+        auto* scripts = script(qsl("qaSubtypeMixedFolder"));
+        const Ref scriptRef{EditorViewType::cmScriptView, scripts->getID()};
+        emit mpHost->signal_itemsChangedByScript();
+        QTRY_VERIFY(row(scriptRef));
+        QCOMPARE(row(filterRef), row(scriptRef));
+        QCOMPARE(row(filterRef)->text(1), qsl("2 folders"));
+        QCOMPARE(row(filterRef)->icon(0).pixmap(24, 24).toImage(), view()->mFolderIcon.pixmap(24, 24).toImage());
+        QVERIFY(row(filterRef)->toolTip(0).contains(qsl("Filter-chain trigger")));
+        QCOMPARE(view()->mMembers.value(row(filterRef)).size(), 2);
+        QCOMPARE(child->getParent(), filter);
+        select(filterRef);
+        auto* tabs = folderTabs();
+        QVERIFY(tabs);
+        const int index = folderTab(filterRef);
+        QVERIFY(index >= 0);
+        QCOMPARE(tabs->tabText(index), qsl("Filter-chain trigger"));
+        QCOMPARE(tabs->tabIcon(index).pixmap(24, 24).toImage(), filterIcon);
+        QVERIFY(tabs->tabToolTip(index).contains(qsl("Filter-chain trigger")));
+        QVERIFY(tabs->tabToolTip(index).contains(QString::number(filter->getID())));
+        scripts->setName(qsl("qaSubtypeSplitScript"));
+        view()->refresh();
+        QVERIFY(row(filterRef) != row(scriptRef));
+        QCOMPARE(row(filterRef)->icon(0).pixmap(24, 24).toImage(), filterIcon);
+        QCOMPARE(row(filterRef)->text(1), qsl("Filter-chain trigger"));
+        QCOMPARE(child->getParent(), filter);
+    }
+
+    void test_contextMenuRestoresToolbarsWithoutSavingDraft_data()
+    {
+        QTest::addColumn<bool>("itemsToolbar");
+        QTest::newRow("actions") << false;
+        QTest::newRow("items") << true;
+    }
+
+    void test_contextMenuRestoresToolbarsWithoutSavingDraft()
+    {
+        QFETCH(bool, itemsToolbar);
+        auto* item = script(qsl("qaRestoreToolbar%1").arg(itemsToolbar), nullptr, false);
+        const Ref ref{EditorViewType::cmScriptView, item->getID()};
+        showCombined();
+        select(ref);
+        auto* toolbar = itemsToolbar ? mpEditor->toolBar2 : mpEditor->toolBar;
+        auto* restoreAction = itemsToolbar ? mpEditor->mpAction_restoreEditorItemsToolbar : mpEditor->mpAction_restoreEditorActionsToolbar;
+        const auto originalArea = mpEditor->toolBarArea(toolbar);
+        const bool originalVisible = toolbar->isVisible();
+        const QString originalText = mpEditor->mpSourceEditorEdbeeDocument->text();
+        const auto restore = qScopeGuard([this, toolbar, originalArea, originalVisible, originalText]() {
+            mpEditor->addToolBar(originalArea, toolbar);
+            toolbar->setVisible(originalVisible);
+            mpEditor->mpSourceEditorEdbeeDocument->setText(originalText);
+        });
+        const QString draft = qsl("-- unsaved toolbar recovery draft");
+        mpEditor->mpSourceEditorEdbeeDocument->setText(draft);
+        mpEditor->addToolBar(Qt::RightToolBarArea, toolbar);
+        toolbar->hide();
+        QVERIFY(!toolbar->isVisible());
+        QVERIFY(restoreAction->isVisible());
+        std::unique_ptr<QMenu> menu(view()->createMenu(row(ref)));
+        QVERIFY(menu->actions().contains(restoreAction));
+        restoreAction->trigger();
+        QVERIFY(toolbar->isVisible());
+        QCOMPARE(mpEditor->toolBarArea(toolbar), itemsToolbar ? Qt::LeftToolBarArea : Qt::TopToolBarArea);
+        QVERIFY(view()->active());
+        QVERIFY(view()->currentEditorItem() == ref);
+        QCOMPARE(mpEditor->mpSourceEditorEdbeeDocument->text(), draft);
+        QCOMPARE(item->getScript(), originalText);
+        std::unique_ptr<QMenu> addMenu(view()->createMenu(row(ref), true));
+        QVERIFY(!addMenu->actions().contains(restoreAction));
     }
 
     void test_menuChoosesEachOriginalParentAndFolderCode()
@@ -426,11 +720,15 @@ private slots:
         const Ref scriptRef{EditorViewType::cmScriptView, scriptFolder->getID()};
         showCombined();
         select(firstRef);
-        QVERIFY(view()->mpSummary->isVisible());
-        QCOMPARE(view()->mpSummary->findChildren<QPushButton*>().size(), 3);
+        QVERIFY(!view()->mpSummary->isVisible());
+        QVERIFY(view()->currentEditorItem() == firstRef);
+        QVERIFY(folderTabs());
+        QCOMPARE(folderTabs()->count(), 3);
+        QCOMPARE(folderTabs()->currentIndex(), 0);
+        QVERIFY(view()->mpSummary->findChildren<QPushButton*>().isEmpty());
         std::unique_ptr<QMenu> menu(view()->createMenu(row(firstRef)));
-        QVERIFY(menuAction(menu.get(), firstRef, qsl("add")));
-        auto* addSecond = menuAction(menu.get(), secondRef, qsl("add"));
+        QVERIFY(menuAction(menu.get(), firstRef, FolderAction::AddItem));
+        auto* addSecond = menuAction(menu.get(), secondRef, FolderAction::AddItem);
         QVERIFY(addSecond);
         QVERIFY(first->getChildrenList()->empty());
         QVERIFY(second->getChildrenList()->empty());
@@ -439,7 +737,7 @@ private slots:
         QCOMPARE(second->getChildrenList()->size(), 1U);
         QCOMPARE(view()->currentEditorItem().id, second->getChildrenList()->front()->getID());
         QVERIFY(view()->active());
-        auto* editScript = menuAction(menu.get(), scriptRef, qsl("edit"));
+        auto* editScript = menuAction(menu.get(), scriptRef, FolderAction::Edit);
         QVERIFY(editScript);
         editScript->trigger();
         QVERIFY(view()->currentEditorItem() == scriptRef);
@@ -449,6 +747,185 @@ private slots:
         mpEditor->slot_saveEdits();
         QCOMPARE(scriptFolder->getScript(), code);
         QCOMPARE(first->getScript(), QString());
+    }
+
+    void test_folderTabsSwitchExactDuplicatesAndRetainSameFolderDraft()
+    {
+        auto* first = trigger(qsl("qaFolderTabs"));
+        auto* second = trigger(qsl("qaFolderTabs"));
+        auto* scripts = script(qsl("qaFolderTabs"));
+        auto* leaf = script(qsl("qaFolderTabsLeaf"), scripts, false);
+        first->setIsActive(false);
+        const Ref firstRef{EditorViewType::cmTriggerView, first->getID()};
+        const Ref secondRef{EditorViewType::cmTriggerView, second->getID()};
+        const Ref scriptRef{EditorViewType::cmScriptView, scripts->getID()};
+        showCombined();
+        select(firstRef);
+        auto* tabs = folderTabs();
+        QVERIFY(tabs);
+        QVERIFY(tabs->isVisible());
+        QVERIFY(!tabs->expanding());
+        QVERIFY(tabs->usesScrollButtons());
+        QCOMPARE(tabs->currentIndex(), 0);
+        const int firstTab = folderTab(firstRef);
+        const int secondTab = folderTab(secondRef);
+        const int scriptTab = folderTab(scriptRef);
+        QCOMPARE(firstTab, 0);
+        QVERIFY(secondTab > 0 && scriptTab > 0);
+        QVERIFY(tabs->tabText(firstTab).startsWith(qsl("Trigger 1")));
+        QCOMPARE(tabs->tabText(secondTab), qsl("Trigger 2"));
+        QCOMPARE(tabs->tabText(scriptTab), qsl("Script"));
+        QVERIFY(tabs->isTabEnabled(firstTab));
+        QVERIFY(!tabs->tabIcon(firstTab).isNull());
+        QVERIFY(!tabs->tabIcon(scriptTab).isNull());
+        QVERIFY(tabs->tabToolTip(firstTab).contains(QString::number(first->getID())));
+        QVERIFY(tabs->tabToolTip(firstTab).contains(qsl("Disabled")));
+        QVERIFY(tabs->tabToolTip(secondTab).contains(qsl("Enabled")));
+
+        QVERIFY(view()->currentEditorItem() == firstRef);
+        QVERIFY(tabs->isVisible());
+        QVERIFY(mpEditor->mpTriggersMainArea->isVisible());
+        QVERIFY(!view()->mpSummary->isVisible());
+        const QString firstDraft = qsl("-- first original folder draft\n");
+        QCoreApplication::processEvents();
+        mpEditor->mpSourceEditorEdbeeDocument->setText(firstDraft);
+        QVERIFY(first->getScript().isEmpty());
+        tabs->setCurrentIndex(secondTab);
+        QVERIFY(view()->currentEditorItem() == secondRef);
+        QCOMPARE(first->getScript(), firstDraft);
+        QVERIFY(second->getScript().isEmpty());
+        const QString secondDraft = qsl("-- second original folder draft\n");
+        mpEditor->mpSourceEditorEdbeeDocument->setText(secondDraft);
+        view()->selectRow(row(firstRef));
+        QVERIFY(view()->currentEditorItem() == secondRef);
+        QCOMPARE(tabs->currentIndex(), secondTab);
+        QCOMPARE(mpEditor->mpSourceEditorEdbeeDocument->text(), secondDraft);
+        QVERIFY(second->getScript().isEmpty());
+        tabs->setCurrentIndex(firstTab);
+        QCOMPARE(second->getScript(), secondDraft);
+        QVERIFY(scripts->getScript().isEmpty());
+        QCOMPARE(tabs->currentIndex(), 0);
+        QVERIFY(tabs->isVisible());
+        QVERIFY(view()->currentEditorItem() == firstRef);
+        QCOMPARE(mpEditor->mpSourceEditorEdbeeDocument->text(), firstDraft);
+        QVERIFY(!view()->mpSummary->isVisible());
+
+        view()->mpTree->setCurrentItem(view()->mpTree->topLevelItem(0));
+        QVERIFY(!tabs->isVisible());
+        QVERIFY(view()->mpSummary->isVisible());
+        QCOMPARE(view()->currentEditorItem().id, 0);
+
+        select({EditorViewType::cmScriptView, leaf->getID()});
+        QVERIFY(!tabs->isVisible());
+        select(scriptRef);
+        QVERIFY(tabs->isVisible());
+        tabs->setCurrentIndex(folderTab(scriptRef));
+        mpEditor->slot_showScripts();
+        QVERIFY(!view()->active());
+        QVERIFY(!tabs->isVisible());
+    }
+
+    void test_folderTabsFollowRefreshSplitMergeAndDeletionWithoutSaving()
+    {
+        auto* triggers = trigger(qsl("qaFolderTabRefresh"));
+        auto* scripts = script(qsl("qaFolderTabRefresh"));
+        const Ref triggerRef{EditorViewType::cmTriggerView, triggers->getID()};
+        const Ref scriptRef{EditorViewType::cmScriptView, scripts->getID()};
+        showCombined();
+        select(scriptRef);
+        auto* tabs = folderTabs();
+        QVERIFY(tabs);
+        QVERIFY(folderTab(scriptRef) >= 0);
+        tabs->setCurrentIndex(folderTab(scriptRef));
+        const QString draft = qsl("qaFolderTabExecutions = (qaFolderTabExecutions or 0) + 1\n");
+        mpEditor->mpSourceEditorEdbeeDocument->setText(draft);
+        auto* duplicate = script(qsl("qaFolderTabRefresh"));
+        const Ref duplicateRef{EditorViewType::cmScriptView, duplicate->getID()};
+        emit mpHost->signal_itemsChangedByScript();
+        QTRY_VERIFY(folderTab(duplicateRef) >= 0);
+        QCOMPARE(tabs->count(), 3);
+        QCOMPARE(tabs->currentIndex(), folderTab(scriptRef));
+        QVERIFY(view()->currentEditorItem() == scriptRef);
+        QCOMPARE(mpEditor->mpSourceEditorEdbeeDocument->text(), draft);
+        QVERIFY(scripts->getScript().isEmpty());
+
+        scripts->setName(qsl("qaFolderTabSplit"));
+        view()->refresh();
+        QVERIFY(row(scriptRef) != row(triggerRef));
+        QCOMPARE(view()->mpTree->currentItem(), row(scriptRef));
+        QCOMPARE(tabs->count(), 1);
+        QCOMPARE(tabs->currentIndex(), folderTab(scriptRef));
+        QCOMPARE(tabs->tabText(tabs->currentIndex()), qsl("Script"));
+        QCOMPARE(mpEditor->mpSourceEditorEdbeeDocument->text(), draft);
+        scripts->setName(qsl("qaFolderTabRefresh"));
+        view()->refresh();
+        QCOMPARE(row(scriptRef), row(triggerRef));
+        QCOMPARE(tabs->count(), 3);
+        QCOMPARE(tabs->currentIndex(), folderTab(scriptRef));
+        QCOMPARE(mpEditor->mpSourceEditorEdbeeDocument->text(), draft);
+        QVERIFY(scripts->getScript().isEmpty());
+        QVERIFY(mpHost->getLuaInterpreter()->compileAndExecuteScript(qsl("assert(qaFolderTabExecutions == nil)")));
+
+        delete scripts;
+        emit mpHost->signal_itemsChangedByScript();
+        QTRY_VERIFY(!row(scriptRef));
+        QCOMPARE(view()->currentEditorItem().id, 0);
+        QVERIFY(!tabs->isVisible());
+        QCOMPARE(mpEditor->mpSourceEditorEdbeeDocument->text(), draft);
+        QVERIFY(mpEditor->mpSourceEditorEdbee->isEnabled());
+        QVERIFY(!mpEditor->mSaveItem->isEnabled());
+        mpEditor->slot_saveEdits();
+        QVERIFY(triggers->getScript().isEmpty());
+        QVERIFY(duplicate->getScript().isEmpty());
+        QVERIFY(mpHost->getLuaInterpreter()->compileAndExecuteScript(qsl("assert(qaFolderTabExecutions == nil)")));
+    }
+
+    void test_folderTabsRejectChangedLuaTableNavigation()
+    {
+        auto* include = mpEditor->findChild<QCheckBox*>(qsl("combinedIncludeVariables"));
+        QVERIFY(include);
+        const bool includedBefore = include->isChecked();
+        const auto restoreVariables = qScopeGuard([include, includedBefore]() {
+            include->setChecked(includedBefore);
+        });
+        auto* scripts = script(qsl("qaFolderTabConflict"));
+        const Ref scriptRef{EditorViewType::cmScriptView, scripts->getID()};
+        QVERIFY(mpHost->getLuaInterpreter()->compileAndExecuteScript(qsl("qaFolderTabConflict = {}")));
+        QVERIFY(includeVariables());
+        const auto table = variable({qsl("qaFolderTabConflict")});
+        QVERIFY(table.id);
+        select(table);
+        auto* tabs = folderTabs();
+        QVERIFY(tabs);
+        const int tableTab = folderTab(table);
+        const int scriptTab = folderTab(scriptRef);
+        QVERIFY(tableTab >= 0 && scriptTab >= 0);
+        QCOMPARE(tabs->tabText(tableTab), qsl("Lua table"));
+        tabs->setCurrentIndex(tableTab);
+        QVERIFY(view()->currentEditorItem() == table);
+        auto* valueType = mpEditor->mpVarsMainArea->comboBox_variable_value_type;
+        QVERIFY(valueType->isEnabled());
+        valueType->setCurrentIndex(valueType->findData(LUA_TSTRING));
+        mpEditor->mpSourceEditorEdbeeDocument->setText(qsl("retained draft"));
+        QVERIFY(mpHost->getLuaInterpreter()->compileAndExecuteScript(qsl("qaFolderTabConflict = {replacement = 'keep me'}")));
+
+        tabs->setCurrentIndex(scriptTab);
+
+        QCOMPARE(tabs->currentIndex(), tableTab);
+        QVERIFY(tabs->isVisible());
+        QVERIFY(!view()->mpSummary->isVisible());
+        QCOMPARE(mpEditor->mCurrentView, EditorViewType::cmVarsView);
+        QCOMPARE(mpEditor->mpSourceEditorEdbeeDocument->text(), qsl("retained draft"));
+        QVERIFY(!mpEditor->mSaveItem->isEnabled());
+        QVERIFY(scripts->getScript().isEmpty());
+        QVERIFY(mpHost->getLuaInterpreter()->compileAndExecuteScript(qsl("assert(qaFolderTabConflict.replacement == 'keep me')")));
+        mpEditor->findChild<QPushButton*>(qsl("combinedRefreshVariables"))->click();
+        QVERIFY(!tabs->isVisible());
+        QCOMPARE(mpEditor->mpSourceEditorEdbeeDocument->text(), qsl("retained draft"));
+        QVERIFY(!mpEditor->mSaveItem->isEnabled());
+        const auto fresh = variable({qsl("qaFolderTabConflict")});
+        QVERIFY(fresh.id);
+        QVERIFY(view()->editItem(fresh));
     }
 
     void test_refreshPreservesDraftAndDoesNotExecuteScript()
@@ -637,6 +1114,333 @@ private slots:
         QCOMPARE(addedFolder->getName(), qsl("Inner"));
         QCOMPARE(addedFolder->getChildrenList()->size(), 1U);
         QVERIFY(!addedFolder->getChildrenList()->front()->isFolder());
+    }
+
+    void test_multiSelectionGesturesAndContextMenuKeepSelectedRows()
+    {
+        auto* parent = script(qsl("qaBatchGestures"));
+        const Ref first{EditorViewType::cmScriptView, script(qsl("qaBatchGestureA"), parent, false)->getID()};
+        const Ref second{EditorViewType::cmScriptView, script(qsl("qaBatchGestureB"), parent, false)->getID()};
+        const Ref third{EditorViewType::cmScriptView, script(qsl("qaBatchGestureC"), parent, false)->getID()};
+        showCombined();
+        select(first);
+        auto* tree = view()->mpTree;
+        auto* window = tree->window()->windowHandle();
+        QVERIFY(window);
+        const auto releaseModifiers = qScopeGuard([window]() {
+            QTest::keyRelease(window, Qt::Key_Control);
+            QTest::keyRelease(window, Qt::Key_Shift);
+        });
+        // Exercise Qt's window-level modifier and focus handling as well as row selection.
+        const auto click = [tree, window](const QPoint& point, Qt::KeyboardModifiers modifiers) {
+            QTest::mouseClick(window, Qt::LeftButton, modifiers, tree->viewport()->mapTo(tree->window(), point));
+        };
+        QCOMPARE(tree->selectionMode(), QAbstractItemView::ExtendedSelection);
+        row(first)->parent()->setExpanded(true);
+        tree->scrollToItem(row(first), QAbstractItemView::PositionAtTop);
+        QCoreApplication::processEvents();
+        const auto firstPoint = tree->visualItemRect(row(first)).intersected(tree->viewport()->rect()).center();
+        const auto thirdPoint = tree->visualItemRect(row(third)).intersected(tree->viewport()->rect()).center();
+        QVERIFY(tree->viewport()->rect().contains(firstPoint));
+        QVERIFY(tree->viewport()->rect().contains(thirdPoint));
+        QCOMPARE(tree->itemAt(firstPoint), row(first));
+        QCOMPARE(tree->itemAt(thirdPoint), row(third));
+        click(firstPoint, Qt::NoModifier);
+        click(thirdPoint, Qt::ControlModifier);
+        QCOMPARE(selectedRefs().size(), 2);
+        QVERIFY(selectedRefs().contains(first) && selectedRefs().contains(third));
+        click(firstPoint, Qt::NoModifier);
+        click(thirdPoint, Qt::ShiftModifier);
+        QCOMPARE(selectedRefs().size(), 3);
+        QVERIFY(selectedRefs().contains(first) && selectedRefs().contains(second) && selectedRefs().contains(third));
+        QTest::keyRelease(window, Qt::Key_Control);
+        QTest::keyRelease(window, Qt::Key_Shift);
+        QCOMPARE(QApplication::keyboardModifiers(), Qt::NoModifier);
+
+        emit tree->customContextMenuRequested(tree->visualItemRect(row(second)).intersected(tree->viewport()->rect()).center());
+        QCOMPARE(selectedRefs().size(), 3);
+        QMenu* popup = nullptr;
+        for (auto* menu : tree->findChildren<QMenu*>()) {
+            if (menu->isVisible())
+                popup = menu;
+        }
+        QVERIFY(popup);
+        const auto closeMenu = qScopeGuard([this, popup]() {
+            popup->close();
+            // The offscreen platform cannot restore native activation after closing a popup.
+            QCoreApplication::processEvents();
+            mpEditor->activateWindow();
+            QCoreApplication::processEvents();
+            view()->mpTree->setFocus();
+        });
+        auto* copy = popup->findChild<QAction*>(qsl("combinedCopySelection"));
+        auto* remove = popup->findChild<QAction*>(qsl("combinedDeleteSelection"));
+        QVERIFY(copy && copy->isEnabled());
+        QVERIFY(remove && remove->isEnabled());
+        QVERIFY(view()->active());
+    }
+
+    void test_batchCopyAllAutomationTypesKeepsDraftAndNativeSelection()
+    {
+        for (auto type :
+             {EditorViewType::cmTriggerView, EditorViewType::cmAliasView, EditorViewType::cmScriptView, EditorViewType::cmTimerView, EditorViewType::cmKeysView, EditorViewType::cmActionView}) {
+            const QString prefix = qsl("qaBatchCopy%1").arg(static_cast<int>(type));
+            const auto first = automationLeaf(type, prefix + qsl("A"));
+            const auto second = automationLeaf(type, prefix + qsl("B"));
+            showCombined();
+            selectBatch({first, second}, second);
+            auto* copy = treeShortcut(QKeySequence::Copy);
+            QVERIFY(copy && copy->isEnabled());
+            auto* native = view()->originalTree(type);
+            auto* nativeCurrent = native->currentItem();
+            const auto nativeSelection = native->selectedItems();
+            const auto originalText = mpEditor->mpSourceEditorEdbeeDocument->text();
+            const auto restoreDraft = qScopeGuard([this, originalText]() {
+                mpEditor->mpSourceEditorEdbeeDocument->setText(originalText);
+            });
+            const QString draft = qsl("-- qaBatchUnsavedDraft%1").arg(static_cast<int>(type));
+            mpEditor->mpSourceEditorEdbeeDocument->setText(draft);
+            QApplication::clipboard()->setText(qsl("before batch copy"));
+            copy->trigger();
+            const auto copied = QApplication::clipboard()->text();
+            QVERIFY(copied.contains(prefix + qsl("A")));
+            QVERIFY(copied.contains(prefix + qsl("B")));
+            QVERIFY(!copied.contains(draft));
+            QCOMPARE(copied.count(qsl("<!--MUDLET_MULTI_ITEM_SEPARATOR-->")), 1);
+            QCOMPARE(native->currentItem(), nativeCurrent);
+            QCOMPARE(native->selectedItems(), nativeSelection);
+            QVERIFY(view()->currentEditorItem() == second);
+            QCOMPARE(selectedRefs().size(), 2);
+            QVERIFY(selectedRefs().contains(first) && selectedRefs().contains(second));
+            QCOMPARE(mpEditor->mpSourceEditorEdbeeDocument->text(), draft);
+            QVERIFY(mpEditor->mSaveItem->isEnabled());
+        }
+    }
+
+    void test_batchSelectionRefreshPreservesIdentitiesAndDraft()
+    {
+        auto* first = script(qsl("qaBatchRefreshA"), nullptr, false);
+        auto* second = script(qsl("qaBatchRefreshB"), nullptr, false);
+        const Ref firstRef{EditorViewType::cmScriptView, first->getID()};
+        const Ref secondRef{EditorViewType::cmScriptView, second->getID()};
+        showCombined();
+        selectBatch({firstRef, secondRef}, secondRef);
+        const auto clearDraft = qScopeGuard([this]() {
+            mpEditor->mpSourceEditorEdbeeDocument->setText(QString());
+        });
+        const QString draft = qsl("qaBatchRefreshExecutions = (qaBatchRefreshExecutions or 0) + 1");
+        mpEditor->mpSourceEditorEdbeeDocument->setText(draft);
+        first->setName(qsl("qaBatchRefreshRenamed"));
+        auto* newItem = trigger(qsl("qaBatchRefreshNew"));
+        emit mpHost->signal_itemsChangedByScript();
+        QTRY_VERIFY(row({EditorViewType::cmTriggerView, newItem->getID()}));
+        QCOMPARE(selectedRefs().size(), 2);
+        QVERIFY(selectedRefs().contains(firstRef) && selectedRefs().contains(secondRef));
+        QVERIFY(view()->currentEditorItem() == secondRef);
+        QCOMPARE(mpEditor->mpSourceEditorEdbeeDocument->text(), draft);
+        QVERIFY(second->getScript().isEmpty());
+        QVERIFY(mpHost->getLuaInterpreter()->compileAndExecuteScript(qsl("assert(qaBatchRefreshExecutions == nil)")));
+    }
+
+    void test_batchDeleteUsesOneNativeUndoCommand()
+    {
+        auto* parent = script(qsl("qaBatchDeleteParent"));
+        auto* survivor = script(qsl("qaBatchDeleteSurvivor"), parent, false);
+        auto* first = script(qsl("qaBatchDeleteA"), parent, false);
+        auto* second = script(qsl("qaBatchDeleteB"), parent, false);
+        const Ref firstRef{EditorViewType::cmScriptView, first->getID()};
+        const Ref secondRef{EditorViewType::cmScriptView, second->getID()};
+        showCombined();
+        selectBatch({firstRef, secondRef}, secondRef);
+        std::unique_ptr<QMenu> menu(view()->createMenu(row(secondRef)));
+        auto* remove = menu->findChild<QAction*>(qsl("combinedDeleteSelection"));
+        QVERIFY(remove && remove->isEnabled());
+        const int undoBefore = mpEditor->mpUndoStack->index();
+        remove->trigger();
+        QCOMPARE(parent->getChildrenList()->size(), 1U);
+        QVERIFY(parent->getChildrenList()->front() == survivor);
+        QCOMPARE(mpEditor->mpUndoStack->index(), undoBefore + 1);
+        QVERIFY(view()->active());
+        mpEditor->mpUndoStack->undo();
+        QCOMPARE(parent->getChildrenList()->size(), 3U);
+        QStringList names;
+        for (auto* item : *parent->getChildrenList())
+            names.append(static_cast<TScript*>(item)->getName());
+        QCOMPARE(names, (QStringList{qsl("qaBatchDeleteSurvivor"), qsl("qaBatchDeleteA"), qsl("qaBatchDeleteB")}));
+        mpEditor->mpUndoStack->redo();
+        QCOMPARE(parent->getChildrenList()->size(), 1U);
+        QVERIFY(parent->getChildrenList()->front() == survivor);
+    }
+
+    void test_invalidBatchesCannotFallThroughToSingleItemActions()
+    {
+        auto* include = mpEditor->findChild<QCheckBox*>(qsl("combinedIncludeVariables"));
+        QVERIFY(include);
+        const bool includedBefore = include->isChecked();
+        const auto restoreVariables = qScopeGuard([include, includedBefore]() {
+            include->setChecked(includedBefore);
+        });
+        const auto first = automationLeaf(EditorViewType::cmScriptView, qsl("qaBatchInvalidScript"));
+        const auto otherType = automationLeaf(EditorViewType::cmTriggerView, qsl("qaBatchInvalidTrigger"));
+        const Ref folder{EditorViewType::cmScriptView, script(qsl("qaBatchInvalidFolder"))->getID()};
+        QVERIFY(mpHost->getLuaInterpreter()->compileAndExecuteScript(qsl("qaBatchInvalidVarA = 'a'; qaBatchInvalidVarB = 'b'")));
+        QVERIFY(includeVariables());
+        const auto varA = variable({qsl("qaBatchInvalidVarA")});
+        const auto varB = variable({qsl("qaBatchInvalidVarB")});
+        QVERIFY(varA.id && varB.id);
+        for (const auto& pair : QList<QList<Ref>>{{otherType, first}, {folder, first}, {varA, varB}}) {
+            selectBatch(pair, pair.last());
+            auto* copy = treeShortcut(QKeySequence::Copy);
+            QVERIFY(copy && !copy->isEnabled());
+            QVERIFY(!mpEditor->mDeleteItem->isEnabled());
+            QApplication::clipboard()->setText(qsl("qaInvalidBatchClipboard"));
+            const int undoBefore = mpEditor->mpUndoStack->index();
+            mpEditor->slot_copyXml();
+            mpEditor->slot_deleteItemOrGroup();
+            QCOMPARE(QApplication::clipboard()->text(), qsl("qaInvalidBatchClipboard"));
+            QCOMPARE(mpEditor->mpUndoStack->index(), undoBefore);
+            for (auto ref : pair)
+                QVERIFY(view()->data(ref).exists);
+        }
+
+        const auto second = automationLeaf(EditorViewType::cmScriptView, qsl("qaBatchInvalidScriptB"));
+        showCombined();
+        selectBatch({first, second}, second);
+        auto* paste = treeShortcut(QKeySequence::Paste);
+        QVERIFY(paste && !paste->isEnabled());
+        for (auto* action : {mpEditor->mAddItem, mpEditor->mAddGroup, mpEditor->mpAction_toggleActive, mpEditor->mpExportAction, mpEditor->mpCreateModuleAction})
+            QVERIFY(!action->isEnabled());
+        QVERIFY(mpEditor->mSaveItem->isEnabled());
+        const auto scriptsBefore = mpHost->getScriptUnit()->getScriptList();
+        const bool enabledBefore = mpHost->getScriptUnit()->getScript(second.id)->shouldBeActive();
+        QVERIFY(view()->addRequested(false));
+        QVERIFY(view()->folderActionRequested());
+        mpEditor->slot_addNewItem();
+        mpEditor->slot_addNewGroup();
+        mpEditor->slot_toggleItemOrGroupActiveFlag();
+        mpEditor->slot_pasteXml();
+        QCOMPARE(mpHost->getScriptUnit()->getScriptList(), scriptsBefore);
+        QCOMPARE(mpHost->getScriptUnit()->getScript(second.id)->shouldBeActive(), enabledBefore);
+        QVERIFY(mpHost->getLuaInterpreter()->compileAndExecuteScript(qsl("assert(qaBatchInvalidVarA == 'a' and qaBatchInvalidVarB == 'b')")));
+    }
+
+    void test_deselectedCurrentCanCopySelectedCategoryButCannotDelete()
+    {
+        const auto first = automationLeaf(EditorViewType::cmTriggerView, qsl("qaBatchUnselectedA"));
+        const auto second = automationLeaf(EditorViewType::cmTriggerView, qsl("qaBatchUnselectedB"));
+        const auto third = automationLeaf(EditorViewType::cmTriggerView, qsl("qaBatchUnselectedCurrent"));
+        const auto scriptRef = automationLeaf(EditorViewType::cmScriptView, qsl("qaBatchOtherCategoryCurrent"));
+        showCombined();
+        select(first);
+        for (auto current : {third, scriptRef}) {
+            for (const auto& selection : QList<QList<Ref>>{{first, second}, {first}}) {
+                selectBatch(selection, current);
+                QVERIFY(!row(current)->isSelected());
+                QVERIFY(view()->currentEditorItem() == current);
+                auto* copy = treeShortcut(QKeySequence::Copy);
+                QVERIFY(copy && copy->isEnabled());
+                QVERIFY(!mpEditor->mDeleteItem->isEnabled());
+                const auto original = mpEditor->mpSourceEditorEdbeeDocument->text();
+                const auto restoreDraft = qScopeGuard([this, original]() {
+                    mpEditor->mpSourceEditorEdbeeDocument->setText(original);
+                });
+                const QString draft = qsl("-- qaBatchUnselectedCurrentDraft");
+                mpEditor->mpSourceEditorEdbeeDocument->setText(draft);
+                mpEditor->slot_copyXml();
+                const auto copied = QApplication::clipboard()->text();
+                QVERIFY(copied.contains(qsl("qaBatchUnselectedA")));
+                QCOMPARE(copied.contains(qsl("qaBatchUnselectedB")), selection.contains(second));
+                QVERIFY(!copied.contains(qsl("qaBatchUnselectedCurrent")));
+                QVERIFY(!copied.contains(qsl("qaBatchOtherCategoryCurrent")));
+                QVERIFY(!copied.contains(draft));
+                mpEditor->slot_deleteItemOrGroup();
+                QVERIFY(view()->data(first).exists && view()->data(second).exists && view()->data(current).exists);
+                QVERIFY(view()->currentEditorItem() == current);
+                QCOMPARE(mpEditor->mpSourceEditorEdbeeDocument->text(), draft);
+                QCOMPARE(selectedRefs().size(), selection.size());
+                QVERIFY(selectedRefs().contains(first));
+                QCOMPARE(selectedRefs().contains(second), selection.contains(second));
+                view()->refresh();
+                QVERIFY(!row(current)->isSelected());
+                QCOMPARE(selectedRefs().size(), selection.size());
+                QVERIFY(view()->currentEditorItem() == current);
+                QCOMPARE(mpEditor->mpSourceEditorEdbeeDocument->text(), draft);
+            }
+        }
+    }
+
+    void test_capturedBatchMenusRejectStaleOrChangedTargets()
+    {
+        for (const QString& change : {qsl("native trees stale"), qsl("deleted"), qsl("became folder"), qsl("outside projection")}) {
+            auto* first = script(qsl("qaBatchStaleA-%1").arg(change), nullptr, false);
+            auto* second = script(qsl("qaBatchStaleB-%1").arg(change), nullptr, false);
+            const Ref firstRef{EditorViewType::cmScriptView, first->getID()};
+            const Ref secondRef{EditorViewType::cmScriptView, second->getID()};
+            showCombined();
+            selectBatch({firstRef, secondRef}, secondRef);
+            std::unique_ptr<QMenu> menu(view()->createMenu(row(secondRef)));
+            auto* copy = menu->findChild<QAction*>(qsl("combinedCopySelection"));
+            auto* remove = menu->findChild<QAction*>(qsl("combinedDeleteSelection"));
+            QVERIFY(copy && copy->isEnabled());
+            QVERIFY(remove && remove->isEnabled());
+            if (change == qsl("native trees stale")) {
+                mpEditor->mNeedUpdateData = true;
+            } else if (change == qsl("deleted")) {
+                delete first;
+            } else if (change == qsl("became folder")) {
+                first->setIsFolder(true);
+            } else {
+                first->setTemporary(true);
+                view()->refresh();
+                QVERIFY(!row(firstRef));
+            }
+            mpEditor->hideSystemMessageArea();
+            QApplication::clipboard()->setText(qsl("qaStaleBatchClipboard"));
+            const int undoBefore = mpEditor->mpUndoStack->index();
+            copy->trigger();
+            QCOMPARE(QApplication::clipboard()->text(), qsl("qaStaleBatchClipboard"));
+            remove->trigger();
+            QVERIFY(mpHost->getScriptUnit()->getScript(secondRef.id));
+            if (change != qsl("deleted"))
+                QVERIFY(mpHost->getScriptUnit()->getScript(firstRef.id));
+            QCOMPARE(mpEditor->mpUndoStack->index(), undoBefore);
+            auto* warning = mpEditor->findChild<QLabel*>(qsl("notificationAreaIconLabelWarning"));
+            QVERIFY(warning && warning->isVisible());
+            QVERIFY(view()->active());
+        }
+    }
+
+    void test_batchCopyAndDeletePruneSelectedDescendants()
+    {
+        auto* parent = trigger(qsl("qaBatchSubtree"), nullptr, false);
+        auto* child = trigger(qsl("qaBatchSubtreeChild"), parent, false);
+        const Ref parentRef{EditorViewType::cmTriggerView, parent->getID()};
+        const Ref childRef{EditorViewType::cmTriggerView, child->getID()};
+        QVERIFY(parent->isFilterChain() && !parent->isFolder());
+        showCombined();
+        // The active child is covered by its selected ancestor during native subtree deletion.
+        selectBatch({parentRef, childRef}, childRef);
+        std::unique_ptr<QMenu> menu(view()->createMenu(row(parentRef)));
+        auto* copy = menu->findChild<QAction*>(qsl("combinedCopySelection"));
+        auto* remove = menu->findChild<QAction*>(qsl("combinedDeleteSelection"));
+        QVERIFY(copy && copy->isEnabled());
+        QVERIFY(remove && remove->isEnabled());
+        copy->trigger();
+        const auto copied = QApplication::clipboard()->text();
+        QVERIFY(copied.contains(qsl("qaBatchSubtreeChild")));
+        QCOMPARE(copied.count(qsl("<!--MUDLET_MULTI_ITEM_SEPARATOR-->")), 0);
+        QCOMPARE(copied.count(qsl("<name>qaBatchSubtreeChild</name>")), 1);
+        const int undoBefore = mpEditor->mpUndoStack->index();
+        remove->trigger();
+        QVERIFY(!mpHost->getTriggerUnit()->getTrigger(parentRef.id));
+        QVERIFY(!mpHost->getTriggerUnit()->getTrigger(childRef.id));
+        QCOMPARE(mpEditor->mpUndoStack->index(), undoBefore + 1);
+        mpEditor->mpUndoStack->undo();
+        auto* restored = mpHost->getTriggerUnit()->findTrigger(qsl("qaBatchSubtree"));
+        QVERIFY(restored);
+        QCOMPARE(restored->getChildrenList()->size(), 1U);
+        QCOMPARE(static_cast<TTrigger*>(restored->getChildrenList()->front())->getName(), qsl("qaBatchSubtreeChild"));
+        QVERIFY(!restored->isFolder() && restored->isFilterChain());
     }
 
     void test_clipboardShortcutsAndPasteKeepCombinedView()
@@ -829,7 +1633,7 @@ private slots:
         showCombined();
         QVERIFY(row(ref));
         std::unique_ptr<QMenu> menu(view()->createMenu(row(ref)));
-        auto* add = menuAction(menu.get(), ref, qsl("add"));
+        auto* add = menuAction(menu.get(), ref, FolderAction::AddItem);
         QVERIFY(add);
         add->trigger();
         QCOMPARE(first->getChildrenList()->size(), 0U);
@@ -878,12 +1682,15 @@ private slots:
         QCOMPARE(row({EditorViewType::cmActionView, package->getID()})->text(1), qsl("Button package"));
         QCOMPARE(row({EditorViewType::cmActionView, packagedToolbar->getID()})->text(1), qsl("Button toolbar"));
         select(toolbarRef);
-        QStringList choices;
-        for (auto* choice : view()->mpSummary->findChildren<QPushButton*>()) {
-            choices.append(choice->text());
-        }
-        QVERIFY(choices.contains(qsl("Button toolbar 1 — Enabled")));
-        QVERIFY(choices.contains(qsl("Button toolbar 2 — Enabled")));
+        auto* tabs = folderTabs();
+        QVERIFY(tabs);
+        const int firstTab = folderTab(toolbarRef);
+        const int duplicateTab = folderTab({EditorViewType::cmActionView, duplicate->getID()});
+        QVERIFY(firstTab >= 0 && duplicateTab >= 0);
+        QCOMPARE(tabs->tabText(firstTab), qsl("Button toolbar 1"));
+        QCOMPARE(tabs->tabText(duplicateTab), qsl("Button toolbar 2"));
+        QVERIFY(tabs->tabToolTip(firstTab).contains(qsl("Enabled")));
+        QVERIFY(tabs->tabToolTip(duplicateTab).contains(qsl("Enabled")));
         QVERIFY(view()->editItem(toolbarRef));
         QVERIFY(mpEditor->mpActionsMainArea->groupBox_action_bar->isVisible());
         QVERIFY(view()->editItem({EditorViewType::cmActionView, menu->getID()}));
@@ -963,8 +1770,8 @@ private slots:
         QVERIFY(view()->currentEditorItem() == ref);
         QCOMPARE(view()->mpTree->currentItem(), row(ref));
         std::unique_ptr<QMenu> menu(view()->createMenu(row(ref)));
-        auto* copy = menuAction(menu.get(), ref, qsl("copy"));
-        auto* paste = menuAction(menu.get(), ref, qsl("paste"));
+        auto* copy = menuAction(menu.get(), ref, FolderAction::Copy);
+        auto* paste = menuAction(menu.get(), ref, FolderAction::Paste);
         QVERIFY(copy);
         QVERIFY(paste);
         copy->trigger();
@@ -996,20 +1803,20 @@ private slots:
         showCombined();
         QVERIFY(row(secondRef));
         std::unique_ptr<QMenu> rootMenu(view()->createMenu(nullptr));
-        auto* addRootButton = menuAction(rootMenu.get(), rootRef, qsl("add"));
-        auto* addToolbar = menuAction(rootMenu.get(), rootRef, qsl("addGroup"));
+        auto* addRootButton = menuAction(rootMenu.get(), rootRef, FolderAction::AddItem);
+        auto* addToolbar = menuAction(rootMenu.get(), rootRef, FolderAction::AddGroup);
         QVERIFY(addRootButton);
         QVERIFY(!addRootButton->isEnabled());
         QVERIFY(addToolbar);
         QCOMPARE(addToolbar->text(), qsl("Add Toolbar"));
         std::unique_ptr<QMenu> packageMenu(view()->createMenu(row({EditorViewType::cmActionView, package->getID()})));
-        auto* addPackagedToolbar = menuAction(packageMenu.get(), {EditorViewType::cmActionView, package->getID()}, qsl("addGroup"));
+        auto* addPackagedToolbar = menuAction(packageMenu.get(), {EditorViewType::cmActionView, package->getID()}, FolderAction::AddGroup);
         QVERIFY(addPackagedToolbar);
         QCOMPARE(addPackagedToolbar->text(), qsl("Add Toolbar"));
-        QVERIFY(!menuAction(packageMenu.get(), {EditorViewType::cmActionView, package->getID()}, qsl("add"))->isEnabled());
+        QVERIFY(!menuAction(packageMenu.get(), {EditorViewType::cmActionView, package->getID()}, FolderAction::AddItem)->isEnabled());
         std::unique_ptr<QMenu> menu(view()->createMenu(row(secondRef)));
-        auto* add = menuAction(menu.get(), secondRef, qsl("add"));
-        auto* addMenu = menuAction(menu.get(), secondRef, qsl("addGroup"));
+        auto* add = menuAction(menu.get(), secondRef, FolderAction::AddItem);
+        auto* addMenu = menuAction(menu.get(), secondRef, FolderAction::AddGroup);
         QVERIFY(add);
         QVERIFY(addMenu);
         QCOMPARE(addMenu->text(), qsl("Add Menu"));
@@ -1190,7 +1997,7 @@ private slots:
         select(ref);
         mpEditor->mpSourceEditorEdbeeDocument->setText(qsl("draft"));
         std::unique_ptr<QMenu> menu(view()->createMenu(row(table)));
-        auto* add = menuAction(menu.get(), table, qsl("add"));
+        auto* add = menuAction(menu.get(), table, FolderAction::AddItem);
         QVERIFY(add);
         QVERIFY(mpHost->getLuaInterpreter()->compileAndExecuteScript(qsl("qaCombinedReplace = {value = 'same'}; collectgarbage('collect')")));
         mpEditor->slot_saveSelectedItem();
@@ -1213,11 +2020,11 @@ private slots:
         const auto table = variable({qsl("qaCombinedAddVars")});
         QVERIFY(table.id);
         std::unique_ptr<QMenu> menu(view()->createMenu(row(table)));
-        auto* add = menuAction(menu.get(), table, qsl("add"));
+        auto* add = menuAction(menu.get(), table, FolderAction::AddItem);
         QVERIFY(add);
-        QVERIFY(!menuAction(menu.get(), table, qsl("toggle")));
-        QVERIFY(!menuAction(menu.get(), table, qsl("paste")));
-        QVERIFY(!menuAction(menu.get(), table, qsl("export")));
+        QVERIFY(!menuAction(menu.get(), table, FolderAction::Toggle));
+        QVERIFY(!menuAction(menu.get(), table, FolderAction::Paste));
+        QVERIFY(!menuAction(menu.get(), table, FolderAction::Export));
         add->trigger();
         QCOMPARE(folder->getChildrenList()->size(), 0U);
         QVERIFY(mpHost->getLuaInterpreter()->compileAndExecuteScript(qsl("assert(qaCombinedAddVars.variable_name ~= nil)")));
@@ -1365,6 +2172,77 @@ private slots:
         }
     }
 
+    void test_variableRecastRejectsMembersAddedBeforeSelection_data()
+    {
+        QTest::addColumn<QString>("operation");
+        QTest::newRow("save") << qsl("save");
+        QTest::newRow("navigation") << qsl("navigation");
+        QTest::newRow("refresh") << qsl("refresh");
+    }
+
+    void test_variableRecastRejectsMembersAddedBeforeSelection()
+    {
+        QFETCH(QString, operation);
+        recreateEditor();
+        QVERIFY(mpHost->getLuaInterpreter()->compileAndExecuteScript(qsl("qaCombinedBeforeSelection = {}")));
+        QVERIFY(includeVariables());
+        const auto table = variable({qsl("qaCombinedBeforeSelection")});
+        QVERIFY(table.id);
+        QCOMPARE(view()->originalItem(table)->childCount(), 0);
+        QVERIFY(mpHost->getLuaInterpreter()->compileAndExecuteScript(qsl("qaCombinedBeforeSelection.arrived = 'keep me'")));
+        QVERIFY(view()->editItem(table));
+        auto* type = mpEditor->mpVarsMainArea->comboBox_variable_value_type;
+        QCOMPARE(type->currentData().toInt(), LUA_TTABLE);
+        // A retained draft must be rejected even if the type control is disabled.
+        type->setCurrentIndex(type->findData(LUA_TSTRING));
+        mpEditor->mpSourceEditorEdbeeDocument->setText(qsl("replacement"));
+        if (operation == qsl("navigation")) {
+            mpEditor->slot_showTriggers();
+        } else {
+            if (operation == qsl("refresh"))
+                view()->refreshVariables();
+            mpEditor->slot_saveSelectedItem();
+        }
+        QVERIFY(mpHost->getLuaInterpreter()->compileAndExecuteScript(qsl("assert(type(qaCombinedBeforeSelection) == 'table' and qaCombinedBeforeSelection.arrived == 'keep me')")));
+        QCOMPARE(mpEditor->mpSourceEditorEdbeeDocument->text(), qsl("replacement"));
+        QVERIFY(view()->active());
+        QVERIFY(!mpEditor->mSaveItem->isEnabled());
+        QVERIFY(!mpEditor->mpCurrentVarItem);
+    }
+
+    void test_variableTypeControlUsesLiveTableContents()
+    {
+        QVERIFY(mpHost->getLuaInterpreter()->compileAndExecuteScript(qsl("qaCombinedLiveContents = {}; qaCombinedLiveContentsRenamed = nil")));
+        QVERIFY(includeVariables());
+        const auto table = variable({qsl("qaCombinedLiveContents")});
+        QVERIFY(table.id);
+        QCOMPARE(view()->originalItem(table)->childCount(), 0);
+        QVERIFY(mpHost->getLuaInterpreter()->compileAndExecuteScript(qsl("qaCombinedLiveContents.arrived = 'keep me'")));
+        QVERIFY(view()->editItem(table));
+        auto* type = mpEditor->mpVarsMainArea->comboBox_variable_value_type;
+        QCOMPARE(type->currentData().toInt(), LUA_TTABLE);
+        QVERIFY(!type->isEnabled());
+        mpEditor->mpVarsMainArea->lineEdit_var_name->setText(qsl("qaCombinedLiveContentsRenamed"));
+        mpEditor->slot_saveSelectedItem();
+        QVERIFY(mpHost->getLuaInterpreter()->compileAndExecuteScript(qsl("assert(qaCombinedLiveContents == nil and qaCombinedLiveContentsRenamed.arrived == 'keep me')")));
+    }
+
+    void test_variableRecastAllowsUnchangedEmptyTable()
+    {
+        QVERIFY(mpHost->getLuaInterpreter()->compileAndExecuteScript(qsl("qaCombinedStillEmpty = {}")));
+        QVERIFY(includeVariables());
+        const auto table = variable({qsl("qaCombinedStillEmpty")});
+        QVERIFY(table.id);
+        QVERIFY(view()->editItem(table));
+        auto* type = mpEditor->mpVarsMainArea->comboBox_variable_value_type;
+        QCOMPARE(type->currentData().toInt(), LUA_TTABLE);
+        QVERIFY(type->isEnabled());
+        type->setCurrentIndex(type->findData(LUA_TSTRING));
+        mpEditor->mpSourceEditorEdbeeDocument->setText(qsl("replacement"));
+        mpEditor->slot_saveSelectedItem();
+        QVERIFY(mpHost->getLuaInterpreter()->compileAndExecuteScript(qsl("assert(qaCombinedStillEmpty == 'replacement')")));
+    }
+
     void test_variableRecastAndSnapshotResetRetainLiveData()
     {
         QVERIFY(mpHost->getLuaInterpreter()->compileAndExecuteScript(qsl("qaCombinedGrowing = {}; qaCombinedSnapshot = 'before'")));
@@ -1460,36 +2338,49 @@ private slots:
     void test_sectionShortcutsReachFolderChoicesAndHandleRoot()
     {
         auto* folder = trigger(qsl("qaSectionFolder"));
-        script(qsl("qaSectionFolder"));
+        auto* scripts = script(qsl("qaSectionFolder"));
         QVERIFY(mpHost->getLuaInterpreter()->compileAndExecuteScript(qsl("qaSectionFolder = {value = 'before'}")));
         QVERIFY(includeVariables());
         select({EditorViewType::cmTriggerView, folder->getID()});
         QCoreApplication::processEvents();
         auto* tree = view()->mpTree;
-        QVERIFY(view()->mpSummary->isVisible());
-        const auto choices = view()->mpSummary->findChildren<QPushButton*>();
-        QCOMPARE(choices.size(), 3);
-        const QPointer<QPushButton> firstChoice = choices.first();
-        QTRY_VERIFY_WITH_TIMEOUT(firstChoice && firstChoice->isVisible(), 1000);
+        QVERIFY(!view()->mpSummary->isVisible());
+        QVERIFY(view()->currentEditorItem() == (Ref{EditorViewType::cmTriggerView, folder->getID()}));
+        auto* tabs = folderTabs();
+        QVERIFY(tabs);
+        QCOMPARE(tabs->count(), 3);
+        QCOMPARE(tabs->currentIndex(), 0);
+        QTRY_VERIFY_WITH_TIMEOUT(tabs->isVisible(), 1000);
         mpEditor->activateWindow();
         tree->setFocus();
         QTRY_VERIFY_WITH_TIMEOUT(focusWithin(tree), 1000);
         sectionShortcut(true);
-        QVERIFY(firstChoice);
-        QCOMPARE(QApplication::focusWidget(), static_cast<QWidget*>(firstChoice.data()));
-        QTest::keyClick(QApplication::focusWidget(), Qt::Key_Tab);
-        QVERIFY(focusWithin(choices.at(1)));
+        QVERIFY(focusWithin(tabs));
+        QCOMPARE(tabs->currentIndex(), 0);
         sectionShortcut(true);
-        QVERIFY(focusWithin(tree));
+        QVERIFY(focusWithin(mpEditor->mpTriggersMainArea->lineEdit_trigger_name));
         sectionShortcut(false);
-        QVERIFY(focusWithin(choices.first()));
+        QVERIFY(focusWithin(tabs));
         sectionShortcut(false);
         QVERIFY(focusWithin(tree));
-        QCOMPARE(mpEditor->mCurrentView, EditorViewType::cmUnknownView);
+        QCOMPARE(mpEditor->mCurrentView, EditorViewType::cmTriggerView);
         QVERIFY(mpHost->getLuaInterpreter()->compileAndExecuteScript(qsl("assert(qaSectionFolder.value == 'before')")));
+
+        tabs->setFocus();
+        QTest::keyClick(tabs, Qt::Key_Right);
+        QVERIFY(view()->currentEditorItem() == (Ref{EditorViewType::cmScriptView, scripts->getID()}));
+        QCOMPARE(tabs->currentIndex(), 1);
+        QVERIFY(focusWithin(tabs));
+        QTest::keyClick(tabs, Qt::Key_Left);
+        QCOMPARE(tabs->currentIndex(), 0);
+        QVERIFY(view()->currentEditorItem() == (Ref{EditorViewType::cmTriggerView, folder->getID()}));
+        QVERIFY(!view()->mpSummary->isVisible());
+        QVERIFY(focusWithin(tabs));
 
         tree->setCurrentItem(tree->topLevelItem(0));
         QCoreApplication::processEvents();
+        QVERIFY(!tabs->isVisible());
+        QVERIFY(view()->mpSummary->isVisible());
         QVERIFY(view()->mpSummary->findChildren<QPushButton*>().isEmpty());
         tree->setFocus();
         sectionShortcut(true);
@@ -1507,6 +2398,7 @@ private slots:
         for (const QString& value : {qsl("qaSectionTable"), qsl("qaSectionFunction"), qsl("qaSectionDisabled")}) {
             const auto ref = variable({value});
             QVERIFY(ref.id);
+            select(ref);
             QVERIFY(view()->editItem(ref));
             QCoreApplication::processEvents();
             if (value == qsl("qaSectionDisabled")) {
@@ -1517,36 +2409,56 @@ private slots:
             }
             tree->setFocus();
             sectionShortcut(true);
+            if (value == qsl("qaSectionTable")) {
+                QVERIFY(folderTabs() && folderTabs()->isVisible());
+                QVERIFY(focusWithin(folderTabs()));
+                sectionShortcut(true);
+            }
             QVERIFY(focusWithin(name));
             sectionShortcut(true);
             QVERIFY(focusWithin(tree));
             sectionShortcut(false);
             QVERIFY(focusWithin(name));
             sectionShortcut(false);
+            if (value == qsl("qaSectionTable")) {
+                QVERIFY(focusWithin(folderTabs()));
+                sectionShortcut(false);
+            }
             QVERIFY(focusWithin(tree));
         }
         mpEditor->mpSourceEditorEdbee->setEnabled(true);
         auto* package = button(qsl("qaSectionPackage"));
         package->mPackageName = qsl("qaSectionPackage");
         showCombined();
-        QVERIFY(view()->editItem({EditorViewType::cmActionView, package->getID()}));
+        const Ref packageRef{EditorViewType::cmActionView, package->getID()};
+        select(packageRef);
+        QVERIFY(view()->editItem(packageRef));
         QCoreApplication::processEvents();
         QVERIFY(!mpEditor->mpActionsMainArea->lineEdit_action_name->isVisible());
         QVERIFY(!mpEditor->mpSourceEditorArea->isVisible());
         auto* stylesheet = mpEditor->mpActionsMainArea->plainTextEdit_action_css;
         QVERIFY(stylesheet->isVisible());
+        QVERIFY(folderTabs() && folderTabs()->isVisible());
         tree->setFocus();
+        sectionShortcut(true);
+        QVERIFY(focusWithin(folderTabs()));
         sectionShortcut(true);
         QVERIFY(focusWithin(stylesheet));
         sectionShortcut(true);
         QVERIFY(focusWithin(tree));
         sectionShortcut(false);
         QVERIFY(focusWithin(stylesheet));
+        sectionShortcut(false);
+        QVERIFY(focusWithin(folderTabs()));
         sectionShortcut(false);
         QVERIFY(focusWithin(tree));
         mpEditor->mpActionsMainArea->setEnabled(false);
         sectionShortcut(true);
+        QVERIFY(focusWithin(folderTabs()));
+        sectionShortcut(true);
         QVERIFY(focusWithin(tree));
+        sectionShortcut(false);
+        QVERIFY(focusWithin(folderTabs()));
         sectionShortcut(false);
         QVERIFY(focusWithin(tree));
         mpEditor->mpActionsMainArea->setEnabled(true);

@@ -30,6 +30,7 @@
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSplitter>
+#include <QTabBar>
 #include <QTimer>
 #include <QToolBar>
 #include <QTreeWidgetItemIterator>
@@ -122,6 +123,43 @@ QString CombinedEditorView::typeName(EditorViewType type)
     }
 }
 
+QString CombinedEditorView::itemTypeName(ItemRef ref) const
+{
+    if (ref.type == EditorViewType::cmTriggerView) {
+        auto* trigger = mpEditor->mpHost->getTriggerUnit()->getTrigger(ref.id);
+        if (trigger && trigger->isFilterChain())
+            //: Trigger with patterns and child triggers, identified separately in the combined tree and folder tabs.
+            return tr("Filter-chain trigger");
+    } else if (ref.type == EditorViewType::cmTimerView) {
+        auto* timer = mpEditor->mpHost->getTimerUnit()->getTimer(ref.id);
+        if (timer && !timer->isFolder() && timer->isOffsetTimer())
+            //: Timer whose delay is relative to its parent timer.
+            return tr("Offset timer");
+    }
+    return typeName(ref.type);
+}
+
+QIcon CombinedEditorView::subtypeIcon(ItemRef ref) const
+{
+    if (ref.type == EditorViewType::cmTriggerView) {
+        auto* trigger = mpEditor->mpHost->getTriggerUnit()->getTrigger(ref.id);
+        if (trigger && trigger->isFilterChain()) {
+            if (!trigger->state())
+                return QIcon(qsl(":/icons/tools-report-bug.png"));
+            return QIcon(qsl(":/icons/filter%1%2.png").arg(trigger->ancestorsActive() ? QString() : qsl("-grey"), trigger->isActive() ? QString() : qsl("-locked")));
+        }
+    } else if (ref.type == EditorViewType::cmTimerView) {
+        auto* timer = mpEditor->mpHost->getTimerUnit()->getTimer(ref.id);
+        if (timer && !timer->isFolder() && timer->isOffsetTimer()) {
+            if (!timer->state())
+                return QIcon(qsl(":/icons/tools-report-bug.png"));
+            // Offset timers can be enabled while waiting; match the native icon's configured state.
+            return QIcon(qsl(":/icons/offsettimer-%1%2.png").arg(timer->shouldBeActive() ? qsl("on") : qsl("off"), timer->ancestorsActive() ? QString() : qsl("-grey")));
+        }
+    }
+    return {};
+}
+
 QString CombinedEditorView::folderName(ItemRef ref) const
 {
     if (ref.type == EditorViewType::cmVarsView) {
@@ -142,8 +180,8 @@ QString CombinedEditorView::folderName(ItemRef ref) const
             return tr("Button menu");
         }
     }
-    //: Original folder category; %1 is Trigger, Alias, Script, Timer, Key or Button.
-    return tr("%1 folder").arg(typeName(ref.type));
+    //: Original folder category or subtype, such as Trigger, Filter-chain trigger or Timer.
+    return tr("%1 folder").arg(itemTypeName(ref));
 }
 
 bool CombinedEditorView::createsToolbar(ItemRef parent) const
@@ -175,7 +213,8 @@ CombinedEditorView::CombinedEditorView(dlgTriggerEditor* editor)
 , mpEditor(editor)
 , mpTree(new QTreeWidget(editor->treeWidget_triggers->parentWidget()))
 , mpSummary(new QWidget(editor->splitter_right))
-, mpSummaryLayout(new QVBoxLayout(mpSummary))
+, mpSummaryTitle(new QLabel(mpSummary))
+, mpFolderTabs(new QTabBar(editor->frame_right))
 , mpAction(new QAction(tr("Combined"), this))
 , mpVariableControls(new QWidget(mpTree->parentWidget()))
 , mpIncludeVariables(new QCheckBox(mpVariableControls))
@@ -242,7 +281,7 @@ CombinedEditorView::CombinedEditorView(dlgTriggerEditor* editor)
                 }
                 mpIncludeVariables->setChecked(false);
                 clearCurrentItems();
-                showFolder(nullptr, false);
+                showEmptyPanel(nullptr);
             }
             refresh();
         }
@@ -252,10 +291,11 @@ CombinedEditorView::CombinedEditorView(dlgTriggerEditor* editor)
 
     mpTree->setObjectName(qsl("treeWidget_combined"));
     mpTree->setHeaderLabels({tr("Name"), tr("Type"), tr("State")});
-    mpTree->setSelectionMode(QAbstractItemView::SingleSelection);
+    mpTree->setSelectionMode(QAbstractItemView::ExtendedSelection);
     mpTree->setDragDropMode(QAbstractItemView::NoDragDrop);
     mpTree->setContextMenuPolicy(Qt::CustomContextMenu);
     mpTree->setIconSize(editor->treeWidget_triggers->iconSize());
+    connect(editor->treeWidget_triggers, &QAbstractItemView::iconSizeChanged, mpTree, &QAbstractItemView::setIconSize);
     mpTree->header()->setStretchLastSection(false);
     mpTree->header()->setSectionResizeMode(0, QHeaderView::Interactive);
     mpTree->setColumnWidth(0, mpTree->fontMetrics().horizontalAdvance(QChar('M')) * 20 + mpTree->indentation() * 3);
@@ -264,30 +304,61 @@ CombinedEditorView::CombinedEditorView(dlgTriggerEditor* editor)
     mpTree->parentWidget()->layout()->addWidget(mpTree);
     mpTree->hide();
     for (auto* action : editor->treeWidget_triggers->actions()) {
-        if (action->shortcut() == QKeySequence(QKeySequence::Copy) || action->shortcut() == QKeySequence(QKeySequence::Paste)) {
+        if (action->shortcut() == QKeySequence(QKeySequence::Copy)) {
+            mpCopyAction = action;
+            mpTree->addAction(action);
+        } else if (action->shortcut() == QKeySequence(QKeySequence::Paste)) {
+            mpPasteAction = action;
             mpTree->addAction(action);
         }
     }
     mpSummary->setObjectName(qsl("combinedFolderSummary"));
+    auto* summaryLayout = new QVBoxLayout(mpSummary);
+    mpSummaryTitle->setTextFormat(Qt::PlainText);
+    summaryLayout->addWidget(mpSummaryTitle);
+    //: Guidance at the Combined root or when no original is selected for editing.
+    auto* help = new QLabel(tr("Select an item or folder to edit it. Use Add Item or right-click to choose its type and original folder."), mpSummary);
+    help->setWordWrap(true);
+    summaryLayout->addWidget(help);
+    summaryLayout->addStretch();
     editor->splitter_right->addWidget(mpSummary);
     mpSummary->hide();
+    mpFolderTabs->setObjectName(qsl("combinedFolderTabs"));
+    //: Accessible name of the tabs choosing one original in a combined folder.
+    mpFolderTabs->setAccessibleName(tr("Original folders"));
+    mpFolderTabs->setExpanding(false);
+    mpFolderTabs->setUsesScrollButtons(true);
+    mpFolderTabs->setElideMode(Qt::ElideNone);
+    mpFolderTabs->setFocusPolicy(Qt::StrongFocus);
+    mpFolderTabs->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    // Keep tabs outside the splitter: native editors persist its pane sizes and order.
+    editor->horizontalLayout_2->removeWidget(editor->splitter_right);
+    auto* folderLayout = new QVBoxLayout;
+    folderLayout->setContentsMargins(0, 0, 0, 0);
+    folderLayout->setSpacing(0);
+    folderLayout->addWidget(mpFolderTabs);
+    folderLayout->addWidget(editor->splitter_right);
+    editor->horizontalLayout_2->addLayout(folderLayout);
+    mpFolderTabs->hide();
+    connect(mpFolderTabs, &QTabBar::currentChanged, this, &CombinedEditorView::selectFolderTab);
     connect(mpTree, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem* item) {
         selectRow(item);
+    });
+    connect(mpTree, &QTreeWidget::itemSelectionChanged, this, [this]() {
+        // Ctrl-deselect can change selection without changing the active editor.
+        if (mActive && !mRefreshing)
+            updateActions();
     });
     connect(mpTree, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
         auto* item = mpTree->itemAt(pos);
         if (item)
-            mpTree->setCurrentItem(item);
+            mpTree->setCurrentItem(item, 0, item->isSelected() ? QItemSelectionModel::NoUpdate : QItemSelectionModel::ClearAndSelect);
         auto* menu = createMenu(item);
         menu->setAttribute(Qt::WA_DeleteOnClose);
         menu->popup(mpTree->viewport()->mapToGlobal(pos));
     });
-    connect(mpTree, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem* item) {
-        if (item && item->data(0, FolderRole).toBool() && !mpSummary->isVisible())
-            showFolder(item, true);
-    });
     connect(mpTree, &QTreeWidget::itemActivated, this, [this](QTreeWidgetItem* item) {
-        if (item && !item->data(0, FolderRole).toBool()) {
+        if (singleCurrentSelection() && item && !item->data(0, FolderRole).toBool()) {
             mpEditor->slot_toggleItemOrGroupActiveFlag();
         }
     });
@@ -642,7 +713,7 @@ void CombinedEditorView::show()
     if (includesVariables())
         refreshVariables();
     refresh();
-    showFolder(mpTree->currentItem(), false);
+    selectRow(mpTree->currentItem());
     maintainVisibility();
     mpTree->setFocus();
 }
@@ -657,9 +728,14 @@ void CombinedEditorView::leave()
     mpVariableControls->hide();
     mpVariableSaved->hide();
     mpSummary->hide();
+    mpFolderTabs->hide();
     mpEditor->mpNonCodeWidgets->show();
     for (auto* action : {mpEditor->mSaveItem, mpEditor->mDeleteItem, mpEditor->mpAction_toggleActive, mpEditor->mpExportAction, mpEditor->mpCreateModuleAction})
         action->setEnabled(true);
+    for (auto* action : {mpCopyAction, mpPasteAction, mpEditor->mAddItem, mpEditor->mAddGroup}) {
+        if (action)
+            action->setEnabled(true);
+    }
 }
 
 void CombinedEditorView::viewChanging(EditorViewType type)
@@ -679,6 +755,7 @@ void CombinedEditorView::maintainVisibility()
     mpVariableControls->show();
     mpRefreshVariables->setEnabled(includesVariables());
     mpEditor->checkBox_displayAllVariables->setVisible(includesVariables());
+    updateFolderTabs();
     updateActions();
 }
 
@@ -708,14 +785,8 @@ bool CombinedEditorView::moveSectionFocus(bool forward)
         }
     };
     appendSection(mpTree, mpTree);
-    if (mpSummary->isVisible()) {
-        for (auto* button : mpSummary->findChildren<QPushButton*>()) {
-            if (button->isVisible() && button->isEnabled()) {
-                appendSection(mpSummary, button);
-                break;
-            }
-        }
-    } else {
+    appendSection(mpFolderTabs, mpFolderTabs);
+    if (!mpSummary->isVisible()) {
         switch (mpEditor->mCurrentView) {
         case EditorViewType::cmTriggerView:
             appendSection(mpEditor->mpTriggersMainArea, mpEditor->mpTriggersMainArea->lineEdit_trigger_name);
@@ -830,9 +901,11 @@ bool CombinedEditorView::variableSearchMatches(QTreeWidgetItem* result, TVar* va
     return path.isEmpty() || path == variablePath(var);
 }
 
-bool CombinedEditorView::watchVariable(TVar* var)
+bool CombinedEditorView::watchVariable(TVar* var, bool* emptyTable)
 {
-    mVariableWatchGeneration = 0;
+    mVariableWatch.generation = 0;
+    if (emptyTable)
+        *emptyTable = false;
     if (!var)
         return false;
     auto* luaInterface = mpEditor->mpHost->getLuaInterface();
@@ -871,7 +944,10 @@ bool CombinedEditorView::watchVariable(TVar* var)
     }
     if (lua_istable(state, -1)) {
         // The native form permits recasting an empty table; stale emptiness must not discard new members.
-        lua_pushboolean(state, tableEmpty(state));
+        const bool empty = tableEmpty(state);
+        if (emptyTable)
+            *emptyTable = empty;
+        lua_pushboolean(state, empty);
         lua_rawseti(state, watch, VariableWatchEmptyTableSlot);
     }
     lua_rawseti(state, watch, ++position);
@@ -880,23 +956,23 @@ bool CombinedEditorView::watchVariable(TVar* var)
     lua_pushvalue(state, watch);
     lua_rawset(state, LUA_REGISTRYINDEX);
     lua_settop(state, top);
-    mVariableWatchGeneration = luaInterface->getVarUnit()->treeGeneration();
-    mVariableWatchLength = position;
+    mVariableWatch.generation = luaInterface->getVarUnit()->treeGeneration();
+    mVariableWatch.length = position;
     return true;
 }
 
 bool CombinedEditorView::variableMatchesWatch() const
 {
     auto* luaInterface = mpEditor->mpHost->getLuaInterface();
-    if (!mWatchedVariableRow.isValid() || mVariableWatchGeneration != luaInterface->getVarUnit()->treeGeneration())
+    if (!mVariableWatch.row.isValid() || mVariableWatch.generation != luaInterface->getVarUnit()->treeGeneration())
         return false;
     auto* tree = mpEditor->treeWidget_variables;
-    auto* var = tree->variableForRow(luaInterface->getVarUnit(), tree->itemFromIndex(mWatchedVariableRow));
+    auto* var = tree->variableForRow(luaInterface->getVarUnit(), tree->itemFromIndex(mVariableWatch.row));
     if (!var)
         return false;
     const auto path = luaInterface->varOrder(var);
     auto* state = luaInterface->getState();
-    if (path.size() + 1 != mVariableWatchLength || !lua_checkstack(state, 8))
+    if (path.size() + 1 != mVariableWatch.length || !lua_checkstack(state, 8))
         return false;
     const int top = lua_gettop(state);
     lua_pushlightuserdata(state, &variableWatchKey);
@@ -926,7 +1002,8 @@ bool CombinedEditorView::variableMatchesWatch() const
     if (same && lua_istable(state, -1)) {
         const bool empty = tableEmpty(state);
         lua_rawgeti(state, watch, VariableWatchEmptyTableSlot);
-        same = empty == static_cast<bool>(lua_toboolean(state, -1));
+        // Snapshot rows can omit members already present when selection starts the watch.
+        same = empty == static_cast<bool>(lua_toboolean(state, -1)) && (empty || mpEditor->mpVarsMainArea->comboBox_variable_value_type->currentData().toInt() == LUA_TTABLE);
     }
     lua_settop(state, top);
     return same;
@@ -935,8 +1012,9 @@ bool CombinedEditorView::variableMatchesWatch() const
 bool CombinedEditorView::variableDraftChanged() const
 {
     auto* form = mpEditor->mpVarsMainArea;
-    return mVariableName != form->lineEdit_var_name->text() || mVariableValue != mpEditor->mpSourceEditorEdbeeDocument->text()
-           || mVariableKeyType != form->comboBox_variable_key_type->currentData().toInt() || mVariableValueType != form->comboBox_variable_value_type->currentData().toInt();
+    return mVariableDraftBaseline.name != form->lineEdit_var_name->text() || mVariableDraftBaseline.value != mpEditor->mpSourceEditorEdbeeDocument->text()
+           || mVariableDraftBaseline.keyType != form->comboBox_variable_key_type->currentData().toInt()
+           || mVariableDraftBaseline.valueType != form->comboBox_variable_value_type->currentData().toInt();
 }
 
 void CombinedEditorView::variableSelected()
@@ -948,17 +1026,20 @@ void CombinedEditorView::variableSelected()
     if (!var)
         return;
     indexVariables();
-    mWatchedVariableRow = tree->indexFromItem(mpEditor->mpCurrentVarItem);
+    mVariableWatch.row = tree->indexFromItem(mpEditor->mpCurrentVarItem);
     mVariableConflict = false;
-    if (!watchVariable(var)) {
+    bool emptyTable = false;
+    if (!watchVariable(var, &emptyTable)) {
         rejectVariableEdit();
         return;
     }
     auto* form = mpEditor->mpVarsMainArea;
-    mVariableName = form->lineEdit_var_name->text();
-    mVariableValue = mpEditor->mpSourceEditorEdbeeDocument->text();
-    mVariableKeyType = form->comboBox_variable_key_type->currentData().toInt();
-    mVariableValueType = form->comboBox_variable_value_type->currentData().toInt();
+    if (var->getValueType() == LUA_TTABLE && !emptyTable)
+        form->comboBox_variable_value_type->setEnabled(false);
+    mVariableDraftBaseline.name = form->lineEdit_var_name->text();
+    mVariableDraftBaseline.value = mpEditor->mpSourceEditorEdbeeDocument->text();
+    mVariableDraftBaseline.keyType = form->comboBox_variable_key_type->currentData().toInt();
+    mVariableDraftBaseline.valueType = form->comboBox_variable_value_type->currentData().toInt();
     updateActions();
     scheduleRefresh();
 }
@@ -1029,7 +1110,7 @@ void CombinedEditorView::refreshVariables()
     auto* tree = mpEditor->treeWidget_variables;
     auto* unit = mpEditor->mpHost->getLuaInterface()->getVarUnit();
     const bool editing = mpEditor->mCurrentView == EditorViewType::cmVarsView && !mpSummary->isVisible();
-    auto* oldVar = mWatchedVariableRow.isValid() ? tree->variableForRow(unit, tree->itemFromIndex(mWatchedVariableRow)) : nullptr;
+    auto* oldVar = mVariableWatch.row.isValid() ? tree->variableForRow(unit, tree->itemFromIndex(mVariableWatch.row)) : nullptr;
     const QString path = variablePath(oldVar);
     const bool draft = editing && (mVariableConflict || variableDraftChanged());
     const bool unchanged = editing && !mVariableConflict && variableMatchesWatch();
@@ -1052,7 +1133,7 @@ void CombinedEditorView::refreshVariables()
             tree->setCurrentItem(source);
             mpEditor->mpCurrentVarItem = source;
             if (draft) {
-                mWatchedVariableRow = tree->indexFromItem(source);
+                mVariableWatch.row = tree->indexFromItem(source);
                 if (!watchVariable(tree->variableForRow(mpEditor->mpHost->getLuaInterface()->getVarUnit(), source)))
                     rejectVariableEdit();
             } else {
@@ -1083,7 +1164,7 @@ void CombinedEditorView::appendChildren(QTreeWidgetItem* parent, const QList<Ite
         const QString mergeKey = info.mergeable ? qsl("name/") + info.name : qsl("variable/%1").arg(ref.id);
         auto* row = info.folder ? folders.value(mergeKey, nullptr) : nullptr;
         if (!row) {
-            row = new QTreeWidgetItem(QStringList{info.name, typeName(ref.type), status(ref)});
+            row = new QTreeWidgetItem(QStringList{info.name, itemTypeName(ref), status(ref)});
             row->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
             row->setData(0, Qt::UserRole, ref.id);
             row->setData(0, TypeRole, static_cast<int>(ref.type));
@@ -1133,12 +1214,14 @@ void CombinedEditorView::appendChildren(QTreeWidgetItem* parent, const QList<Ite
             }
             states.insert(state);
             //: %1 is an item or folder type, %2 its profile-local ID, %3 its enabled/error state.
-            descriptions.append(tr("%1 #%2: %3").arg(info.folder ? folderName(ref) : typeName(ref.type)).arg(ref.id).arg(state));
+            descriptions.append(tr("%1 #%2: %3").arg(info.folder ? folderName(ref) : itemTypeName(ref)).arg(ref.id).arg(state));
             if (!info.valid)
                 descriptions.append(info.error);
         }
+        const QIcon subtype = members.size() == 1 ? subtypeIcon(members.first()) : QIcon();
         if (row->data(0, FolderRole).toBool()) {
-            row->setIcon(0, members.size() == 1 && members.first().type == EditorViewType::cmVarsView ? QIcon(qsl(":/icons/table.png")) : mFolderIcon);
+            const QIcon folderIcon = members.size() == 1 && members.first().type == EditorViewType::cmVarsView ? QIcon(qsl(":/icons/table.png")) : mFolderIcon;
+            row->setIcon(0, subtype.isNull() ? folderIcon : subtype);
             if (members.size() > 1) {
                 //: Number of original folders, or folders and a Lua table, consolidated into one display row.
                 row->setText(1, variableState.isEmpty() ? tr("%n folders", nullptr, members.size()) : tr("%n sources", nullptr, members.size()));
@@ -1153,7 +1236,7 @@ void CombinedEditorView::appendChildren(QTreeWidgetItem* parent, const QList<Ite
             }
             row->setText(2, state);
         } else {
-            row->setIcon(0, mTypeIcons.value(members.first().type));
+            row->setIcon(0, subtype.isNull() ? mTypeIcons.value(members.first().type) : subtype);
         }
         row->setToolTip(0, descriptions.join(QChar('\n')));
         row->setData(0, Qt::AccessibleDescriptionRole, descriptions.join(qsl("; ")));
@@ -1171,6 +1254,15 @@ void CombinedEditorView::refresh()
     QSignalBlocker blocker(mpTree);
     const auto selected = mMembers.value(mpTree->currentItem());
     const QString selectedPath = mpTree->currentItem() ? mpTree->currentItem()->data(0, PathRole).toString() : QString();
+    QList<ItemRef> selectedItems;
+    QSet<QString> selectedFolders;
+    const bool singleFolder = singleCurrentSelection() && folderSelected();
+    for (auto* row : mpTree->selectedItems()) {
+        if (row->data(0, FolderRole).toBool())
+            selectedFolders.insert(row->data(0, PathRole).toString());
+        else
+            selectedItems.append(mMembers.value(row));
+    }
     const auto editing = currentEditorItem();
     const bool firstBuild = mpTree->topLevelItemCount() == 0;
     rememberExpandedFolders();
@@ -1203,6 +1295,7 @@ void CombinedEditorView::refresh()
     for (QTreeWidgetItemIterator it(mpTree); *it; ++it) {
         auto* row = *it;
         const auto members = mMembers.value(row);
+        row->setSelected(row->data(0, FolderRole).toBool() ? selectedFolders.contains(row->data(0, PathRole).toString()) : members.size() == 1 && selectedItems.contains(members.first()));
         const bool wasExpanded = std::any_of(members.cbegin(), members.cend(), [&](ItemRef ref) {
             return expandedMembers.contains({ref.type, ref.id});
         });
@@ -1220,10 +1313,15 @@ void CombinedEditorView::refresh()
     // A renamed merged folder can split; follow the edited original rather than a sibling member.
     if (editingRow)
         selection = editingRow;
-    mpTree->setCurrentItem(selection);
+    // Current identifies the open form; Ctrl-deselect must not silently add it back to the batch.
+    mpTree->setCurrentItem(selection, 0, QItemSelectionModel::NoUpdate);
+    if (firstBuild || singleFolder) {
+        mpTree->clearSelection();
+        selection->setSelected(true);
+    }
     mpTree->verticalScrollBar()->setValue(scroll);
     if (mpSummary->isVisible())
-        showFolder(selection, false);
+        showEmptyPanel(selection);
     if (editing.id && !data(editing).exists) {
         clearCurrentItems();
         //: The source editor retains an unsaved draft after its original object was deleted externally.
@@ -1235,6 +1333,137 @@ void CombinedEditorView::refresh()
 bool CombinedEditorView::folderSelected() const
 {
     return mActive && (!mpTree->currentItem() || mpTree->currentItem()->data(0, FolderRole).toBool());
+}
+
+bool CombinedEditorView::singleCurrentSelection() const
+{
+    const auto selected = mpTree->selectedItems();
+    return selected.size() == 1 && selected.first() == mpTree->currentItem();
+}
+
+QList<CombinedEditorView::ItemRef> CombinedEditorView::selectedItemRefs() const
+{
+    QList<ItemRef> result;
+    // Tree order makes the clipboard deterministic regardless of Ctrl-click order.
+    for (QTreeWidgetItemIterator it(mpTree); *it; ++it) {
+        auto* row = *it;
+        if (!row->isSelected() || row->isHidden())
+            continue;
+        const auto members = mMembers.value(row);
+        if (row->data(0, FolderRole).toBool() || members.size() != 1)
+            return {};
+        result.append(members.first());
+    }
+    return result;
+}
+
+CombinedEditorView::SelectionProblems CombinedEditorView::selectionProblems(const QList<ItemRef>& refs) const
+{
+    //: Explains the scope of bulk operations in the combined editor.
+    const auto unsupported = tr("Select individual items of one automation category. Folders and Variables do not support bulk actions.");
+    if (refs.isEmpty()) {
+        return {unsupported, unsupported};
+    }
+    QSet<QPair<EditorViewType, int>> displayed;
+    for (QTreeWidgetItemIterator it(mpTree); *it; ++it) {
+        const auto members = mMembers.value(*it);
+        if (!(*it)->isHidden() && !(*it)->data(0, FolderRole).toBool() && members.size() == 1)
+            displayed.insert({members.first().type, members.first().id});
+    }
+    for (auto ref : refs) {
+        if (!ref.id || ref.type == EditorViewType::cmVarsView || ref.type != refs.first().type) {
+            return {unsupported, unsupported};
+        }
+        const auto info = data(ref);
+        if (!info.exists || info.folder || info.temporary || info.hidden || !displayed.contains({ref.type, ref.id})) {
+            //: A menu's captured originals must all still be eligible when its action is invoked.
+            const auto changed = tr("The selection has changed. Select the items again before copying or deleting them.");
+            return {changed, changed};
+        }
+    }
+    if (!refs.contains(currentEditorItem())) {
+        //: Native deletion changes the open editor; protect a draft belonging to an unselected item.
+        return {{}, tr("Select the item open in the editor before deleting the selection.")};
+    }
+    return {};
+}
+
+bool CombinedEditorView::selectionActionRequested(bool deleting)
+{
+    if (!mActive || mRouting)
+        return false;
+    if (singleCurrentSelection() && (folderSelected() || mMembers.value(mpTree->currentItem()).contains(currentEditorItem())))
+        return false;
+    runSelectionAction(selectedItemRefs(), deleting);
+    return true;
+}
+
+void CombinedEditorView::runSelectionAction(const QList<ItemRef>& refs, bool deleting)
+{
+    if (!mActive || mRouting)
+        return;
+    const auto problems = selectionProblems(refs);
+    auto problem = deleting ? problems.deletion : problems.copy;
+    if (problem.isEmpty() && mpEditor->mNeedUpdateData)
+        //: Rebuilding native trees navigates/saves; a bulk action must not do that implicitly.
+        problem = tr("The original views need refreshing. Select another item, then select these items again before copying or deleting them.");
+    QList<QTreeWidgetItem*> targets;
+    if (problem.isEmpty()) {
+        for (auto ref : refs) {
+            auto* original = originalItem(ref);
+            const int parentId = original && original->parent() ? original->parent()->data(0, Qt::UserRole).toInt() : 0;
+            if (!original || parentId != data(ref).parent.id) {
+                //: Never perform only the surviving portion of a batch from a stale menu or tree.
+                problem = tr("The original views have changed. Select the items again before copying or deleting them.");
+                break;
+            }
+            // Non-folder filter chains and timers may own children. Native operations include
+            // the whole subtree, so handing them both ancestor and child would duplicate it.
+            bool covered = false;
+            for (auto parent = data(ref).parent; parent.id; parent = data(parent).parent) {
+                if (refs.contains(parent)) {
+                    covered = true;
+                    break;
+                }
+            }
+            if (!covered)
+                targets.append(original);
+        }
+    }
+    if (!problem.isEmpty()) {
+        mpEditor->showWarning(problem);
+        scheduleRefresh();
+        return;
+    }
+    auto* tree = originalTree(refs.first().type);
+    {
+        QScopedValueRollback routing(mRouting, true);
+        const auto previousSelection = tree->selectedItems();
+        // These two native signals both reload the form. Selection mirroring must never save
+        // or overwrite a draft; the native handlers receive the batch only for this call.
+        {
+            QSignalBlocker blocker(tree);
+            QSignalBlocker selectionBlocker(tree->selectionModel());
+            tree->clearSelection();
+            for (auto* item : targets)
+                item->setSelected(true);
+        }
+        if (deleting) {
+            mpEditor->slot_deleteItemOrGroup();
+        } else {
+            // Ctrl-deselect can leave a different category active. Copy uses the selected
+            // category's model without navigating away from the open form.
+            QScopedValueRollback currentView(mpEditor->mCurrentView, refs.first().type);
+            mpEditor->slot_copyXml();
+            QSignalBlocker blocker(tree);
+            QSignalBlocker selectionBlocker(tree->selectionModel());
+            tree->clearSelection();
+            for (auto* item : previousSelection)
+                item->setSelected(true);
+        }
+    }
+    if (deleting)
+        syncSelection();
 }
 
 void CombinedEditorView::updateActions()
@@ -1256,50 +1485,120 @@ void CombinedEditorView::updateActions()
     }
     mpEditor->mAddItem->setText(tr("Add Item"));
     mpEditor->mAddGroup->setText(tr("Add Group"));
+    const bool single = singleCurrentSelection();
+    for (auto* action : {mpEditor->mAddItem, mpEditor->mAddGroup, mpPasteAction}) {
+        if (action)
+            action->setEnabled(single);
+    }
+    const auto problems = single ? SelectionProblems{} : selectionProblems(selectedItemRefs());
+    if (mpCopyAction)
+        mpCopyAction->setEnabled(single ? mpEditor->mCurrentView != EditorViewType::cmVarsView : problems.copy.isEmpty());
+    if (!single) {
+        for (auto* action : {mpEditor->mpAction_toggleActive, mpEditor->mpExportAction, mpEditor->mpCreateModuleAction})
+            action->setEnabled(false);
+        mpEditor->mDeleteItem->setEnabled(problems.deletion.isEmpty());
+        //: Deletes selected automation items; the editor form still belongs to one active item.
+        mpEditor->mDeleteItem->setText(tr("Delete Selection"));
+    } else {
+        mpEditor->mDeleteItem->setText(tr("Delete Item"));
+    }
     updateVariableControls();
     mpEditor->slot_updateUndoRedoButtonStates();
 }
 
-void CombinedEditorView::showFolder(QTreeWidgetItem* row, bool saveChanges)
+void CombinedEditorView::selectFolder(QTreeWidgetItem* row)
 {
-    if (saveChanges) {
-        if (!variableNavigationAllowed())
-            return;
-        saveAndClearCurrentItems();
+    const auto members = mMembers.value(row);
+    if (row && row->parent() && !members.isEmpty()) {
+        const auto current = currentEditorItem();
+        editItem(members.contains(current) ? current : members.first());
+        return;
     }
-    while (auto* item = mpSummaryLayout->takeAt(0)) {
-        delete item->widget();
-        delete item;
-    }
-    auto* title = new QLabel(row ? row->text(0) : tr("Combined"), mpSummary);
-    title->setTextFormat(Qt::PlainText);
-    mpSummaryLayout->addWidget(title);
-    const bool rootSelected = !row || !row->parent();
-    //: Instructions above the combined tree's folder chooser or its root overview.
-    auto* help = new QLabel(rootSelected ? tr("Select an item to edit it. Use Add Item or right-click to choose its type and original folder.")
-                                         : tr("Choose an original folder or Lua table to edit its settings. Right-click for actions on that original."),
-                            mpSummary);
-    help->setWordWrap(true);
-    mpSummaryLayout->addWidget(help);
-    QHash<int, int> ordinals;
-    for (auto ref : mMembers.value(row)) {
-        if (!ref.id)
-            continue;
-        const int ordinal = ++ordinals[static_cast<int>(ref.type)];
-        //: %1 is the folder type/role, %2 distinguishes same-type originals, %3 is their enabled/error state.
-        auto* button = new QPushButton(tr("%1 %2 — %3").arg(folderName(ref)).arg(ordinal).arg(status(ref)), mpSummary);
-        //: Tooltip; %1 is the original folder's numeric ID within its category.
-        button->setToolTip(ref.type == EditorViewType::cmVarsView ? data(ref).name : tr("Edit original folder #%1").arg(ref.id));
-        connect(button, &QPushButton::clicked, this, [this, ref]() {
-            editItem(ref);
-        });
-        mpSummaryLayout->addWidget(button);
-    }
-    mpSummaryLayout->addStretch();
+    if (!variableNavigationAllowed())
+        return;
+    saveAndClearCurrentItems();
+    showEmptyPanel(row);
+}
+
+void CombinedEditorView::showEmptyPanel(QTreeWidgetItem* row)
+{
+    mpSummaryTitle->setText(row ? row->text(0) : tr("Combined"));
     mpEditor->mpNonCodeWidgets->hide();
     mpEditor->mpSourceEditorArea->hide();
     mpSummary->show();
+    updateFolderTabs();
     updateActions();
+}
+
+void CombinedEditorView::updateFolderTabs()
+{
+    auto* row = mpTree->currentItem();
+    const auto members = mMembers.value(row);
+    auto editing = currentEditorItem();
+    if (mVariableConflict && mVariableWatch.row.isValid()) {
+        // A rejected variable draft retains its tab identity for display, never as a save target.
+        auto* watched = mpEditor->treeWidget_variables->itemFromIndex(mVariableWatch.row);
+        editing = {EditorViewType::cmVarsView, watched->data(0, VariableIdRole).toInt()};
+    }
+    const int selected = members.indexOf(editing);
+    if (!mActive || !row || !row->parent() || !row->data(0, FolderRole).toBool() || mpSummary->isVisible() || selected < 0) {
+        // A removed source or expired variable snapshot must not silently select a different original.
+        mpFolderTabs->hide();
+        return;
+    }
+
+    QSignalBlocker blocker(mpFolderTabs);
+    bool rebuild = mpFolderTabs->count() != members.size();
+    for (int i = 0; !rebuild && i < members.size(); ++i)
+        rebuild = mpFolderTabs->tabData(i).toList() != QVariantList{static_cast<int>(members[i].type), members[i].id};
+    if (rebuild) {
+        while (mpFolderTabs->count())
+            mpFolderTabs->removeTab(0);
+        for (const auto ref : members) {
+            const int index = mpFolderTabs->addTab(QString());
+            mpFolderTabs->setTabData(index, QVariantList{static_cast<int>(ref.type), ref.id});
+        }
+    }
+    QHash<EditorViewType, int> counts;
+    QHash<EditorViewType, int> ordinals;
+    for (const auto ref : members)
+        ++counts[ref.type];
+    for (int i = 0; i < members.size(); ++i) {
+        const auto ref = members[i];
+        const auto item = data(ref);
+        QString label = ref.type == EditorViewType::cmActionView || ref.type == EditorViewType::cmVarsView ? folderName(ref) : itemTypeName(ref);
+        if (counts[ref.type] > 1) {
+            //: Tab label distinguishing multiple originals of one category, e.g. Trigger 2.
+            label = tr("%1 %2").arg(label).arg(++ordinals[ref.type]);
+        }
+        //: Original-folder tab description, with its category/ordinal and current state.
+        const QString description = tr("%1 — %2").arg(label, status(ref));
+        if (ref.type != EditorViewType::cmVarsView && (!item.valid || !item.enabled || !item.ancestorsEnabled))
+            label = description;
+        //: Tooltip identifying an original folder by its numeric category-local ID.
+        const QString identity = ref.type == EditorViewType::cmVarsView ? item.name : tr("Original folder #%1").arg(ref.id);
+        mpFolderTabs->setTabText(i, label);
+        const QIcon subtype = subtypeIcon(ref);
+        mpFolderTabs->setTabIcon(i, subtype.isNull() ? mTypeIcons.value(ref.type) : subtype);
+        mpFolderTabs->setTabToolTip(i, description + QChar('\n') + identity + (item.error.isEmpty() ? QString() : QChar('\n') + item.error));
+        mpFolderTabs->setAccessibleTabName(i, description);
+    }
+    mpFolderTabs->setCurrentIndex(selected);
+    mpFolderTabs->show();
+}
+
+void CombinedEditorView::selectFolderTab(int index)
+{
+    if (!mActive || index < 0)
+        return;
+    const bool focused = mpFolderTabs->hasFocus();
+    const auto identity = mpFolderTabs->tabData(index).toList();
+    if (identity.size() == 2)
+        editItem({static_cast<EditorViewType>(identity[0].toInt()), identity[1].toInt()});
+    // Navigation can be refused by the live-variable guard; restore the tab to the retained draft.
+    updateFolderTabs();
+    if (focused && mpFolderTabs->isVisible())
+        mpFolderTabs->setFocus(Qt::OtherFocusReason);
 }
 
 void CombinedEditorView::selectRow(QTreeWidgetItem* row)
@@ -1307,11 +1606,12 @@ void CombinedEditorView::selectRow(QTreeWidgetItem* row)
     if (!mActive || mRefreshing || !row)
         return;
     if (row->data(0, FolderRole).toBool())
-        showFolder(row, true);
+        selectFolder(row);
     else if (!mMembers.value(row).isEmpty())
         editItem(mMembers.value(row).first());
     // Native selection handlers focus the code pane; arrow navigation must stay in this tree.
     mpTree->setFocus(Qt::OtherFocusReason);
+    updateActions();
 }
 
 bool CombinedEditorView::editItem(ItemRef ref, bool originalView)
@@ -1395,7 +1695,8 @@ void CombinedEditorView::syncSelection()
     QSignalBlocker blocker(mpTree);
     for (QTreeWidgetItemIterator it(mpTree); *it; ++it) {
         if (mMembers.value(*it).contains(selected)) {
-            mpTree->setCurrentItem(*it);
+            // Search, paste and undo deliberately adopt the native result, unlike passive refresh.
+            mpTree->setCurrentItem(*it, 0, QItemSelectionModel::ClearAndSelect);
             mpTree->scrollToItem(*it);
             break;
         }
@@ -1405,7 +1706,7 @@ void CombinedEditorView::syncSelection()
         mpEditor->mpNonCodeWidgets->show();
     } else {
         clearCurrentItems();
-        showFolder(mpTree->currentItem(), false);
+        showEmptyPanel(mpTree->currentItem());
     }
     maintainVisibility();
 }
@@ -1413,6 +1714,28 @@ void CombinedEditorView::syncSelection()
 QMenu* CombinedEditorView::createMenu(QTreeWidgetItem* row, bool addOnly, bool folder)
 {
     auto* menu = new QMenu(mpTree);
+    if (!singleCurrentSelection() && row && row->isSelected()) {
+        const auto refs = selectedItemRefs();
+        const auto problems = selectionProblems(refs);
+        menu->setToolTipsVisible(true);
+        for (bool deleting : {false, true}) {
+            //: Context actions for the selected items in the combined editor tree.
+            auto* action = menu->addAction(deleting ? tr("Delete Selection") : tr("Copy Selection"));
+            action->setObjectName(deleting ? qsl("combinedDeleteSelection") : qsl("combinedCopySelection"));
+            const auto& problem = deleting ? problems.deletion : problems.copy;
+            action->setEnabled(problem.isEmpty());
+            //: Copy/Delete includes descendants just as it does in the original category view.
+            action->setToolTip(problem.isEmpty() ? tr("Applies to the selected originals and their children.") : problem);
+            // Keep the menu's exact targets even if a refresh replaces its rows or selection changes.
+            connect(action, &QAction::triggered, this, [this, refs, deleting]() {
+                runSelectionAction(refs, deleting);
+            });
+        }
+        menu->addSeparator();
+        menu->addAction(mpEditor->mpAction_restoreEditorActionsToolbar);
+        menu->addAction(mpEditor->mpAction_restoreEditorItemsToolbar);
+        return menu;
+    }
     QList<ItemRef> members = mMembers.value(row);
     if (!row) {
         for (auto type : visibleTypes())
@@ -1429,12 +1752,12 @@ QMenu* CombinedEditorView::createMenu(QTreeWidgetItem* row, bool addOnly, bool f
         const QString label = ref.id ? tr("%1 %2 — %3").arg(folderName(ref)).arg(ordinal).arg(status(ref)) : typeName(ref.type);
         QMenu* target = members.size() > 1 || info.folder ? menu->addMenu(label) : menu;
         target->setToolTipsVisible(true);
-        const auto action = [&](const QString& text, const QString& operation) {
+        const auto action = [&](const QString& text, FolderAction operation) {
             auto* entry = target->addAction(text);
-            entry->setData(QVariantList{static_cast<int>(ref.type), ref.id, operation});
+            entry->setData(QVariantList{static_cast<int>(ref.type), ref.id, static_cast<int>(operation)});
             //: Tooltip; %1 is the original object's numeric ID within its category.
             entry->setToolTip(tr("Original item #%1").arg(ref.id));
-            if (operation == qsl("add") && createsToolbar(parent)) {
+            if (operation == FolderAction::AddItem && createsToolbar(parent)) {
                 entry->setEnabled(false);
                 //: A button must be added to an existing toolbar or menu, not directly to a package or the root.
                 entry->setToolTip(tr("Choose a toolbar or menu to add a button."));
@@ -1451,7 +1774,7 @@ QMenu* CombinedEditorView::createMenu(QTreeWidgetItem* row, bool addOnly, bool f
                 //: A button must be added to an existing toolbar or menu, not directly to a package or the root.
                 entry->setToolTip(tr("Choose a toolbar or menu to add a button."));
             }
-            entry->setData(QVariantList{static_cast<int>(parent.type), parent.id, folder ? qsl("addGroup") : qsl("add")});
+            entry->setData(QVariantList{static_cast<int>(parent.type), parent.id, static_cast<int>(folder ? FolderAction::AddGroup : FolderAction::AddItem)});
             connect(entry, &QAction::triggered, this, [this, parent, folder]() {
                 addItem(parent, folder);
             });
@@ -1459,71 +1782,91 @@ QMenu* CombinedEditorView::createMenu(QTreeWidgetItem* row, bool addOnly, bool f
         }
         if (ref.id) {
             //: Opens the native value editor for Variables or code editor for other categories.
-            action(ref.type == EditorViewType::cmVarsView ? tr("Edit Value and Settings") : tr("Edit Code and Settings"), qsl("edit"));
-            action(tr("Open Original Folder or Item"), qsl("original"));
+            action(ref.type == EditorViewType::cmVarsView ? tr("Edit Value and Settings") : tr("Edit Code and Settings"), FolderAction::Edit);
+            action(tr("Open Original Folder or Item"), FolderAction::OpenOriginal);
             target->addSeparator();
         }
         if (ref.type != EditorViewType::cmVarsView)
-            action(tr("Paste"), qsl("paste"));
-        action(addLabel(parent, false), qsl("add"));
-        action(addLabel(parent, true), qsl("addGroup"));
+            action(tr("Paste"), FolderAction::Paste);
+        action(addLabel(parent, false), FolderAction::AddItem);
+        action(addLabel(parent, true), FolderAction::AddGroup);
         if (ref.id) {
             target->addSeparator();
             if (ref.type == EditorViewType::cmVarsView) {
-                action(tr("Delete"), qsl("delete"));
+                action(tr("Delete"), FolderAction::Delete);
                 continue;
             }
-            action(info.enabled ? tr("Disable") : tr("Enable"), qsl("toggle"));
-            action(tr("Copy"), qsl("copy"));
+            action(info.enabled ? tr("Disable") : tr("Enable"), FolderAction::Toggle);
+            action(tr("Copy"), FolderAction::Copy);
 
-            action(tr("Export"), qsl("export"));
-            action(tr("Create Module"), qsl("module"));
-            action(tr("Delete"), qsl("delete"));
+            action(tr("Export"), FolderAction::Export);
+            action(tr("Create Module"), FolderAction::CreateModule);
+            action(tr("Delete"), FolderAction::Delete);
         }
     }
     if (row && row->data(0, FolderRole).toBool())
         appendMissingParents(menu, row, folder);
+    if (!addOnly) {
+        menu->addSeparator();
+        menu->addAction(mpEditor->mpAction_restoreEditorActionsToolbar);
+        menu->addAction(mpEditor->mpAction_restoreEditorItemsToolbar);
+    }
     return menu;
 }
 
-void CombinedEditorView::runFolderAction(ItemRef ref, const QString& operation)
+void CombinedEditorView::runFolderAction(ItemRef ref, FolderAction operation)
 {
     if (!data(ref).exists) {
         scheduleRefresh();
         return;
     }
-    if (operation == qsl("original")) {
+    if (operation == FolderAction::OpenOriginal) {
         editItem(ref, true);
         return;
     }
-    if (operation == qsl("add") || operation == qsl("addGroup")) {
+    if (operation == FolderAction::AddItem || operation == FolderAction::AddGroup) {
         const auto info = data(ref);
-        addItem(info.folder ? ref : info.parent, operation == qsl("addGroup"));
+        addItem(info.folder ? ref : info.parent, operation == FolderAction::AddGroup);
         return;
     }
     if (!editItem(ref))
         return;
-    if (ref.type == EditorViewType::cmVarsView && operation != qsl("edit") && !variableSaveAllowed())
+    if (ref.type == EditorViewType::cmVarsView && operation != FolderAction::Edit && !variableSaveAllowed())
         return;
     NavigationGuard navigation(this);
-    if (operation == qsl("toggle"))
+    switch (operation) {
+    case FolderAction::Toggle:
         mpEditor->slot_toggleItemOrGroupActiveFlag();
-    else if (operation == qsl("delete"))
+        break;
+    case FolderAction::Delete:
         mpEditor->slot_deleteItemOrGroup();
-    else if (operation == qsl("copy"))
+        break;
+    case FolderAction::Copy:
         mpEditor->slot_copyXml();
-    else if (operation == qsl("paste"))
+        break;
+    case FolderAction::Paste:
         mpEditor->slot_pasteXml();
-    else if (operation == qsl("export"))
+        break;
+    case FolderAction::Export:
         mpEditor->slot_export();
-    else if (operation == qsl("module"))
+        break;
+    case FolderAction::CreateModule:
         mpEditor->slot_createModule();
+        break;
+    case FolderAction::Edit:
+    case FolderAction::OpenOriginal:
+    case FolderAction::AddItem:
+    case FolderAction::AddGroup:
+        break;
+    }
 }
 
 bool CombinedEditorView::addRequested(bool folder)
 {
     if (!mActive || mRouting)
         return false;
+    if (!singleCurrentSelection())
+        return true;
     auto* menu = createMenu(mpTree->currentItem(), true, folder);
     menu->setAttribute(Qt::WA_DeleteOnClose);
     menu->popup(mpTree->viewport()->mapToGlobal(mpTree->visualItemRect(mpTree->currentItem()).bottomLeft()));
@@ -1532,7 +1875,12 @@ bool CombinedEditorView::addRequested(bool folder)
 
 bool CombinedEditorView::folderActionRequested()
 {
-    if (!mActive || mRouting || !folderSelected())
+    if (!mActive || mRouting)
+        return false;
+    // Shared shortcuts must not fall through to an unrelated active item in a mixed selection.
+    if (!singleCurrentSelection())
+        return true;
+    if (!folderSelected())
         return false;
     auto* menu = createMenu(mpTree->currentItem());
     menu->setAttribute(Qt::WA_DeleteOnClose);

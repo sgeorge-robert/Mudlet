@@ -11523,6 +11523,8 @@ void dlgTriggerEditor::slot_sourceFindTextChanges()
 
 void dlgTriggerEditor::slot_deleteItemOrGroup()
 {
+    if (mpCombinedView && mpCombinedView->selectionActionRequested(true))
+        return;
     if (mpCombinedView && mpCombinedView->folderActionRequested())
         return;
     switch (resolveCurrentView()) {
@@ -12551,6 +12553,8 @@ void dlgTriggerEditor::slot_createModule()
 
 void dlgTriggerEditor::slot_copyXml()
 {
+    if (mpCombinedView && mpCombinedView->selectionActionRequested(false))
+        return;
     if (mpCombinedView && mpCombinedView->folderActionRequested())
         return;
     switch (resolveCurrentView()) {

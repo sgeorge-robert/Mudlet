@@ -16,9 +16,10 @@ class QMenu;
 class QTreeWidget;
 class QTreeWidgetItem;
 class QWidget;
-class QVBoxLayout;
+class QLabel;
 class QCheckBox;
 class QPushButton;
+class QTabBar;
 class TVar;
 
 // Rows project the original units; merged folders never own or reparent profile objects.
@@ -63,6 +64,7 @@ public:
     bool addRequested(bool folder);
     bool folderSelected() const;
     bool folderActionRequested();
+    bool selectionActionRequested(bool deleting);
     bool includesVariables() const;
     bool readingVariables() const { return mReadingVariables; }
     void refreshVariables();
@@ -74,6 +76,30 @@ public:
 
 private:
     friend class CombinedEditorViewTest;
+    enum class FolderAction { Edit, OpenOriginal, AddItem, AddGroup, Toggle, Copy, Paste, Export, CreateModule, Delete };
+
+    struct SelectionProblems
+    {
+        QString copy;
+        QString deletion;
+    };
+
+    // Refresh can renew the live watch while retaining the draft's comparison baseline.
+    struct VariableWatch
+    {
+        QPersistentModelIndex row;
+        quint64 generation = 0;
+        int length = 0;
+    };
+
+    struct VariableDraftBaseline
+    {
+        QString name;
+        QString value;
+        int keyType = 0;
+        int valueType = 0;
+    };
+
     struct ItemData
     {
         bool exists = false;
@@ -93,6 +119,8 @@ private:
     static QList<EditorViewType> types();
     QList<EditorViewType> visibleTypes() const;
     static QString typeName(EditorViewType);
+    QString itemTypeName(ItemRef) const;
+    QIcon subtypeIcon(ItemRef) const;
     QString folderName(ItemRef) const;
     bool createsToolbar(ItemRef parent) const;
     QString addLabel(ItemRef parent, bool folder) const;
@@ -106,18 +134,25 @@ private:
     void appendChildren(QTreeWidgetItem*, const QList<ItemRef>&, const QString&);
     void selectRow(QTreeWidgetItem*);
     bool editItem(ItemRef, bool originalView = false);
-    void showFolder(QTreeWidgetItem*, bool saveChanges);
+    void selectFolder(QTreeWidgetItem*);
+    void showEmptyPanel(QTreeWidgetItem*);
+    void updateFolderTabs();
+    void selectFolderTab(int index);
     void syncSelection();
     void updateActions();
+    bool singleCurrentSelection() const;
+    QList<ItemRef> selectedItemRefs() const;
+    SelectionProblems selectionProblems(const QList<ItemRef>&) const;
+    void runSelectionAction(const QList<ItemRef>&, bool deleting);
     QMenu* createMenu(QTreeWidgetItem*, bool addOnly = false, bool folder = false);
     void addItem(ItemRef parent, bool folder, const QString& name = {});
     void createHierarchyAndAdd(ItemRef ancestor, const QStringList& path, bool folder);
     void appendMissingParents(QMenu*, QTreeWidgetItem*, bool folder);
-    void runFolderAction(ItemRef, const QString&);
+    void runFolderAction(ItemRef, FolderAction);
     void indexVariables();
     TVar* variable(ItemRef) const;
     QString variablePath(TVar*) const;
-    bool watchVariable(TVar*);
+    bool watchVariable(TVar*, bool* emptyTable = nullptr);
     bool variableMatchesWatch() const;
     bool variableDraftChanged() const;
     void rejectVariableEdit();
@@ -130,21 +165,19 @@ private:
     dlgTriggerEditor* mpEditor;
     QTreeWidget* mpTree;
     QWidget* mpSummary;
-    QVBoxLayout* mpSummaryLayout;
+    QLabel* mpSummaryTitle;
+    QTabBar* mpFolderTabs;
     QAction* mpAction;
+    QAction* mpCopyAction = nullptr;
+    QAction* mpPasteAction = nullptr;
     QWidget* mpVariableControls;
     QCheckBox* mpIncludeVariables;
     QPushButton* mpRefreshVariables;
     QCheckBox* mpVariableSaved;
     QHash<int, QPersistentModelIndex> mVariableRows;
-    QPersistentModelIndex mWatchedVariableRow;
     int mNextVariableId = 0;
-    quint64 mVariableWatchGeneration = 0;
-    int mVariableWatchLength = 0;
-    QString mVariableName;
-    QString mVariableValue;
-    int mVariableKeyType = 0;
-    int mVariableValueType = 0;
+    VariableWatch mVariableWatch;
+    VariableDraftBaseline mVariableDraftBaseline;
     QIcon mFolderIcon;
     QHash<QTreeWidgetItem*, QList<ItemRef>> mMembers;
     QHash<EditorViewType, QIcon> mTypeIcons;

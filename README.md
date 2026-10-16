@@ -30,26 +30,29 @@ and the difference between an item being disabled and being blocked by its paren
 
 - **Browse related automation together.** Matching folder names merge for display,
   folders come first, and icons identify each item type.
-- **Keep control of the originals.** Open an item's usual editor, or choose the
-  original folder whose code, settings, and actions you want to use.
+- **Keep control of the originals.** Open an item's usual editor, or use the
+  original-folder tabs to reach each folder's code and settings. The tree's
+  context menu offers actions for each original.
 - **Include live Lua state when useful.** The optional **Include Variables** setting
   adds variables and tables; it is off by default and remembered per profile.
 - **Return to a familiar view at any time.** The regular category views remain
   available from the editor toolbar.
 
 <details>
-  <summary>See how matching folders keep their original settings</summary>
+  <summary>Each original folder stays accessible</summary>
 
-[![Combat folder showing separate choices for two trigger folders and the other original types](docs/images/combined-editor/original-folders.jpg)](docs/images/combined-editor/original-folders.jpg)
+[![Compact tabs for seven original folders, with the first trigger folder open](docs/images/combined-editor/original-folders.jpg)](docs/images/combined-editor/original-folders.jpg)
 
-Here, seven originals appear as one **Combat** row. Both trigger folders remain
-individually accessible, with their own enabled states. Selecting a choice opens
-that original's settings; right-clicking gives actions for that original.
+Here, seven originals appear as one **Combat** row. Compact tabs keep each
+original's code and settings accessible, with the first original open immediately.
+The two trigger folders have separate tabs, and the second trigger folder and
+timer folder are marked **Disabled**.
 
 </details>
 
-These are real captures from a Windows development build using synthetic offline
-data. See the [screenshot notes](docs/images/combined-editor/README.md) for provenance.
+Captured on **15 October 2026** from a Windows development build using synthetic
+offline data. See the [screenshot notes](docs/images/combined-editor/README.md)
+for provenance.
 
 Read the [Combined editor guide](docs/combined-editor-view.md) for usage and current
 limits, or the [fork notes](FORK.md) for implementation scope and validation.
